@@ -36,6 +36,7 @@ endif()
 qt_add_plugin(ModelViewerPlugin
   CLASS_NAME ModelViewerPlugin
   src/ModelViewerPlugin.cpp
+  src/ModelViewerWidget.cpp
   src/ModelView.cpp
   farman-sdk/viewer/IViewerPlugin.cpp
 )

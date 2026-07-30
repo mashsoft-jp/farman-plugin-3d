@@ -1,6 +1,6 @@
 #include "ModelViewerPlugin.h"
 
-#include "ModelView.h"
+#include "ModelViewerWidget.h"
 
 #include <QFileInfo>
 
@@ -13,13 +13,13 @@ bool ModelViewerPlugin::canHandle(const QString& filePath) const {
 
 QWidget* ModelViewerPlugin::createViewer(const QString& filePath, QWidget* parent,
                                          const PluginContext& /*ctx*/) {
-  auto* view = new ModelView(parent);
+  auto*   widget = new ModelViewerWidget(parent);  // ツールバー + 3D ビュー
   QString err;
-  if (!view->loadModel(filePath, &err)) {
+  if (!widget->loadModel(filePath, &err)) {
     // 読み込み失敗でもウィジェットは返す (空の 3D ビュー)。呼び出し側が所有。
     qWarning("ModelViewerPlugin: load failed: %s", qPrintable(err));
   }
-  return view;
+  return widget;
 }
 
 } // namespace Farman
