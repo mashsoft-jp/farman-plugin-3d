@@ -515,9 +515,18 @@ void ModelView::resetView() {
 }
 
 void ModelView::keyPressEvent(QKeyEvent* e) {
-  if (e->key() == Qt::Key_R) {
-    resetView();
-    return;
+  switch (e->key()) {
+    case Qt::Key_R: resetView(); return;                       // ビューリセット
+    case Qt::Key_T: setTextureEnabled(!m_texEnabled); return;  // テクスチャ
+    case Qt::Key_G: setShowGrid(!m_showGrid); return;          // グリッド
+    case Qt::Key_W: setWireframe(!m_wireframe); return;        // ワイヤーフレーム
+    case Qt::Key_Space:
+      if (m_hasAnim) {
+        setAnimationPlaying(!m_playing);
+        return;
+      }
+      break;
+    default: break;
   }
   QOpenGLWidget::keyPressEvent(e);
 }
