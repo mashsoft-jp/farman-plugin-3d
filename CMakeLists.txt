@@ -69,3 +69,27 @@ if(assimp_FOUND)
 else()
   target_link_libraries(ModelViewerPlugin PRIVATE PkgConfig::ASSIMP)
 endif()
+
+# ── 単体検証用 PoC (任意) ────────────────────────────────────────────
+# ModelViewerWidget を単体アプリで開いて表示/スクショ確認するための開発ツール。
+# 描画本体 (ModelView/ModelViewerWidget) はプラグインと共有。CI では不要なので
+# 既定 OFF。ローカル検証時に -DFARMAN3D_BUILD_POC=ON で有効化する。
+#   例: ./build/model_poc <model.fbx> [--shot <png>] [--uishot <png>]
+#       [--time <sec>] [--no-texture] [--wire] [--bones]
+option(FARMAN3D_BUILD_POC "Build the standalone model_poc test tool" OFF)
+if(FARMAN3D_BUILD_POC)
+  qt_add_executable(model_poc
+    tools/model_poc/main.cpp
+    src/ModelViewerWidget.cpp
+    src/ModelView.cpp
+  )
+  set_target_properties(model_poc PROPERTIES AUTOMOC ON)
+  target_include_directories(model_poc PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(model_poc PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL)
+  if(assimp_FOUND)
+    target_link_libraries(model_poc PRIVATE assimp::assimp)
+  else()
+    target_link_libraries(model_poc PRIVATE PkgConfig::ASSIMP)
+  endif()
+endif()
