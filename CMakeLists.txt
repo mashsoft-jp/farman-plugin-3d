@@ -14,7 +14,8 @@ set(CMAKE_AUTOMOC ON)
 # farman と同じ Qt を指すよう、macOS の Homebrew では
 #   cmake -B build -DCMAKE_PREFIX_PATH="/opt/homebrew/opt/qt;/opt/homebrew/opt/assimp"
 # のように渡す。
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
+# QOpenGLWidget は使わず (オフスクリーン FBO → QImage 方式)、QtOpenGL のみ必要。
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL)
 
 # Homebrew の assimp は keg-only なので明示的にパスを通す。
 if(APPLE)
@@ -62,7 +63,6 @@ target_link_libraries(ModelViewerPlugin PRIVATE
   Qt6::Gui
   Qt6::Widgets
   Qt6::OpenGL
-  Qt6::OpenGLWidgets
 )
 if(assimp_FOUND)
   target_link_libraries(ModelViewerPlugin PRIVATE assimp::assimp)

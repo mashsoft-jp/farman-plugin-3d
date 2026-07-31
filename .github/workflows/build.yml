@@ -1,0 +1,182 @@
+# GitHub Actions: push / PR / 手動起動で 3 OS 分の 3D ビュアープラグインを
+# ビルドし、成果物 (ModelViewerPlugin.{dylib,so,dll}) を Artifacts に上げる。
+# Windows / Linux での動作確認を回すための CI (署名・Release はしない)。
+# 正式配布は release.yml (v* タグ) が担当する。
+#
+#   ★ABI 一致が必須: プラグインは farman 本体と同じ Qt でビルドしないと、
+#     farman プロセスにロードされたとき qobject_cast や動的リンク解決に失敗する。
+#     QT_VERSION は farman 本体の release.yml と必ず揃えること (現在 6.10.3)。
+#
+#   ★依存の扱い:
+#     - assimp: farman 本体は使わない依存なので、プラグインに「静的リンク」して
+#       自己完結させる (配布物は単一ファイル)。CI で assimp を静的ビルドする。
+#     - Qt6OpenGL: farman 本体が同梱する (本体 CMakeLists に Qt6::OpenGL を追加済)。
+#       プラグインは farman プロセスに既ロードの Qt を再利用する。
+
+name: Build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # farman 本体 (.github/workflows/release.yml の QT_VERSION) と揃えること。
+  QT_VERSION: 6.10.3
+  # assimp は farman 本体の Homebrew 版に合わせる (upstream タグ)。
+  ASSIMP_VERSION: v6.0.4
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (arm64)
+            os: macos-latest
+            qt_host: mac
+            qt_arch: clang_64
+            artifact_name: macos
+          - name: Linux (x86_64)
+            os: ubuntu-22.04
+            qt_host: linux
+            qt_arch: linux_gcc_64
+            artifact_name: linux
+          - name: Windows (x64)
+            os: windows-latest
+            qt_host: windows
+            qt_arch: win64_msvc2022_64
+            artifact_name: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: ${{ matrix.qt_host }}
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
+          # QtOpenGL は qtbase に含まれるため追加モジュールは不要。
+
+      # Linux はプラグインのビルドに OpenGL の開発ヘッダが要る。
+      - name: Install OpenGL / zlib headers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev zlib1g-dev
+
+      # ──────── assimp を静的ビルド (キャッシュ) ────────
+      - name: Cache assimp (static)
+        id: cache-assimp
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/assimp-install
+          key: assimp-${{ env.ASSIMP_VERSION }}-${{ runner.os }}-static-v1
+
+      - name: Build assimp (static, Unix)
+        if: runner.os != 'Windows' && steps.cache-assimp.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "${ASSIMP_VERSION}" \
+            https://github.com/assimp/assimp.git "$RUNNER_TEMP/assimp-src"
+          cmake -S "$RUNNER_TEMP/assimp-src" -B "$RUNNER_TEMP/assimp-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DASSIMP_BUILD_TESTS=OFF \
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+            -DASSIMP_BUILD_SAMPLES=OFF \
+            -DASSIMP_INSTALL=ON \
+            -DASSIMP_NO_EXPORT=ON \
+            -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/assimp-install"
+          cmake --build "$RUNNER_TEMP/assimp-build" --config Release --parallel 3
+          cmake --install "$RUNNER_TEMP/assimp-build" --config Release
+
+      - name: Build assimp (static, Windows)
+        if: runner.os == 'Windows' && steps.cache-assimp.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "$env:ASSIMP_VERSION" `
+            https://github.com/assimp/assimp.git "$env:RUNNER_TEMP/assimp-src"
+          cmake -S "$env:RUNNER_TEMP/assimp-src" -B "$env:RUNNER_TEMP/assimp-build" `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DASSIMP_BUILD_TESTS=OFF `
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF `
+            -DASSIMP_BUILD_SAMPLES=OFF `
+            -DASSIMP_INSTALL=ON `
+            -DASSIMP_NO_EXPORT=ON `
+            -DASSIMP_WARNINGS_AS_ERRORS=OFF `
+            -DASSIMP_BUILD_ZLIB=ON `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/assimp-install"
+          cmake --build "$env:RUNNER_TEMP/assimp-build" --config Release --parallel 3
+          cmake --install "$env:RUNNER_TEMP/assimp-build" --config Release
+
+      # ──────── Configure / Build (プラグイン) ────────
+      # assimp は静的ライブラリを CMAKE_PREFIX_PATH に足して find_package させる。
+      # Qt は install-qt-action が CMAKE_PREFIX_PATH env に登録済み。
+      - name: Configure & build (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -Dassimp_ROOT="$RUNNER_TEMP/assimp-install"
+          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+
+      - name: Configure & build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -Dassimp_ROOT="$env:RUNNER_TEMP/assimp-install"
+          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+
+      # ──────── 成果物の収集 ────────
+      - name: Collect artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p out
+          f=$(find build -type f \( -name 'ModelViewerPlugin.dylib' -o -name 'ModelViewerPlugin.so' \) | head -1)
+          echo "built: $f"
+          cp "$f" "out/$(basename "$f")"
+
+          # macOS: プラグインの Qt framework 参照を farman.app がバンドルする
+          # 位置 @executable_path/../Frameworks/ に書き換える (assimp は静的なので不要)。
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            dylib="out/ModelViewerPlugin.dylib"
+            fw="@executable_path/../Frameworks"
+            for dep in $(otool -L "$dylib" | awk 'NR>1{print $1}'); do
+              case "$dep" in
+                *Qt*.framework/*)
+                  name=$(echo "$dep" | sed -E 's#.*/([A-Za-z0-9]+)\.framework/.*#\1#')
+                  install_name_tool -change "$dep" \
+                    "$fw/${name}.framework/Versions/A/${name}" "$dylib" ;;
+              esac
+            done
+            echo "=== otool -L (rewritten) ==="
+            otool -L "$dylib" || true
+          fi
+
+      - name: Collect artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $f = Get-ChildItem -Path build -Recurse -Filter ModelViewerPlugin.dll | Select-Object -First 1
+          Write-Host "built: $($f.FullName)"
+          Copy-Item $f.FullName "out/ModelViewerPlugin.dll"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: out
+          retention-days: 7

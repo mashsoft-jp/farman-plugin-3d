@@ -1,0 +1,295 @@
+# GitHub Actions: タグ push をトリガに 3 OS 分の 3D ビュアープラグインをビルドし、
+# GitHub Releases に draft として公開する。
+#
+#   トリガ:
+#     - `v*` 形式のタグ push (v1.0.0 など)
+#     - workflow_dispatch (GitHub UI から手動起動: 試運転用)
+#
+#   フロー:
+#     1. matrix で macOS(arm64) / Linux(x86_64) / Windows(x64) をビルド
+#     2. 成果物 (ModelViewerPlugin.{dylib,so,dll}) を release ジョブへ集約
+#     3. ファイル名にタグと OS を埋め込んで draft Release に添付
+#        → 中身を確認してから手動で Publish する運用
+#
+#   ★ABI 一致が必須: プラグインは farman 本体と同じ Qt でビルドしないと、farman
+#     プロセスにロードされたときに qobject_cast や動的リンク解決に失敗する。
+#     QT_VERSION は farman 本体の release.yml と必ず揃えること (現在 6.10.3)。
+#
+#   ★依存の扱い (build.yml と同じ):
+#     - assimp: farman 本体は使わないので、プラグインに静的リンクして自己完結。
+#     - Qt6OpenGL: farman 本体が同梱 (本体 CMakeLists に Qt6::OpenGL を追加済)。
+#       macOS ジョブでプラグインの Qt framework 参照を
+#       @executable_path/../Frameworks/ に書き換え、farman.app 内の既ロード
+#       フレームワークに解決させる (@rpath では farman のバンドルに届かない)。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0). 手動起動時のみ必須。'
+        required: true
+
+env:
+  # farman 本体 (.github/workflows/release.yml の QT_VERSION) と揃えること。
+  QT_VERSION: 6.10.3
+  ASSIMP_VERSION: v6.0.4
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (arm64)
+            os: macos-latest
+            qt_host: mac
+            qt_arch: clang_64
+            artifact_name: macos
+          - name: Linux (x86_64)
+            os: ubuntu-22.04
+            qt_host: linux
+            qt_arch: linux_gcc_64
+            artifact_name: linux
+          - name: Windows (x64)
+            os: windows-latest
+            qt_host: windows
+            qt_arch: win64_msvc2022_64
+            artifact_name: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: ${{ matrix.qt_host }}
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
+
+      - name: Install OpenGL / zlib headers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev zlib1g-dev
+
+      # ──────── assimp を静的ビルド (キャッシュ) ────────
+      - name: Cache assimp (static)
+        id: cache-assimp
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/assimp-install
+          key: assimp-${{ env.ASSIMP_VERSION }}-${{ runner.os }}-static-v1
+
+      - name: Build assimp (static, Unix)
+        if: runner.os != 'Windows' && steps.cache-assimp.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "${ASSIMP_VERSION}" \
+            https://github.com/assimp/assimp.git "$RUNNER_TEMP/assimp-src"
+          cmake -S "$RUNNER_TEMP/assimp-src" -B "$RUNNER_TEMP/assimp-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DASSIMP_BUILD_TESTS=OFF \
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+            -DASSIMP_BUILD_SAMPLES=OFF \
+            -DASSIMP_INSTALL=ON \
+            -DASSIMP_NO_EXPORT=ON \
+            -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/assimp-install"
+          cmake --build "$RUNNER_TEMP/assimp-build" --config Release --parallel 3
+          cmake --install "$RUNNER_TEMP/assimp-build" --config Release
+
+      - name: Build assimp (static, Windows)
+        if: runner.os == 'Windows' && steps.cache-assimp.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "$env:ASSIMP_VERSION" `
+            https://github.com/assimp/assimp.git "$env:RUNNER_TEMP/assimp-src"
+          cmake -S "$env:RUNNER_TEMP/assimp-src" -B "$env:RUNNER_TEMP/assimp-build" `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DASSIMP_BUILD_TESTS=OFF `
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF `
+            -DASSIMP_BUILD_SAMPLES=OFF `
+            -DASSIMP_INSTALL=ON `
+            -DASSIMP_NO_EXPORT=ON `
+            -DASSIMP_WARNINGS_AS_ERRORS=OFF `
+            -DASSIMP_BUILD_ZLIB=ON `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/assimp-install"
+          cmake --build "$env:RUNNER_TEMP/assimp-build" --config Release --parallel 3
+          cmake --install "$env:RUNNER_TEMP/assimp-build" --config Release
+
+      # ──────── Configure / Build (プラグイン) ────────
+      - name: Configure & build (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -Dassimp_ROOT="$RUNNER_TEMP/assimp-install"
+          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+
+      - name: Configure & build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -Dassimp_ROOT="$env:RUNNER_TEMP/assimp-install"
+          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+
+      # ──────── 成果物の収集・命名 ────────
+      - name: Collect artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p out
+          f=$(find build -type f \( -name 'ModelViewerPlugin.dylib' -o -name 'ModelViewerPlugin.so' \) | head -1)
+          echo "built: $f"
+          cp "$f" "out/$(basename "$f")"
+
+          # macOS: Qt framework 参照を farman.app のバンドル位置に書き換える
+          # (assimp は静的リンクなので書き換え不要)。
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            dylib="out/ModelViewerPlugin.dylib"
+            fw="@executable_path/../Frameworks"
+            for dep in $(otool -L "$dylib" | awk 'NR>1{print $1}'); do
+              case "$dep" in
+                *Qt*.framework/*)
+                  name=$(echo "$dep" | sed -E 's#.*/([A-Za-z0-9]+)\.framework/.*#\1#')
+                  install_name_tool -change "$dep" \
+                    "$fw/${name}.framework/Versions/A/${name}" "$dylib" ;;
+              esac
+            done
+            echo "=== otool -L (rewritten) ==="
+            otool -L "$dylib" || true
+          fi
+
+      # 署名 + 公証 (macOS)。install_name 書き換えで署名が無効化されるため、
+      # 書き換えの「後」に署名する。MACOS_* secrets が揃っていれば Developer ID
+      # で署名 + 公証する。無ければ ad-hoc のまま (ユーザーは
+      # xattr -dr com.apple.quarantine が必要)。bare dylib は staple 不可なので
+      # 公証済み cdhash のオンライン照合に頼る。
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT_BASE64:   ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID:      ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          TEAM_ID:       ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+          NOTARY_PW:     ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+        run: |
+          dylib="out/ModelViewerPlugin.dylib"
+          if [ -z "$CERT_BASE64" ]; then
+            echo "::warning::Developer ID signing NOT available (MACOS_* secrets 未設定)。"
+            echo "ad-hoc のまま配布します。ユーザーは xattr -dr com.apple.quarantine が必要です。"
+            exit 0
+          fi
+
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "$CERT_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain  -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S "apple-tool:,apple:,codesign:" \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          IDENTITY_HASH=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -n 1 | awk '{print $2}')
+          if [ -z "$IDENTITY_HASH" ]; then
+            echo "::error::Developer ID Application identity not found after import"; exit 1
+          fi
+
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY_HASH" "$dylib"
+          codesign --verify --strict "$dylib"
+
+          /usr/bin/ditto -c -k "$dylib" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$NOTARY_PW" --wait
+          echo "signed + notarized: $(codesign -dv "$dylib" 2>&1 | grep -i authority | head -1)"
+
+      - name: Collect artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $f = Get-ChildItem -Path build -Recurse -Filter ModelViewerPlugin.dll | Select-Object -First 1
+          Write-Host "built: $($f.FullName)"
+          Copy-Item $f.FullName "out/ModelViewerPlugin.dll"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: out
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Rename artifacts with tag + OS
+        run: |
+          cd dist
+          ls -la */
+          TAG="${{ steps.tag.outputs.tag }}"
+          mv macos/ModelViewerPlugin.dylib   "ModelViewerPlugin-${TAG}-macos-arm64.dylib"
+          mv linux/ModelViewerPlugin.so      "ModelViewerPlugin-${TAG}-linux-x86_64.so"
+          mv windows/ModelViewerPlugin.dll   "ModelViewerPlugin-${TAG}-windows-x64.dll"
+          ls -la
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          for f in ModelViewerPlugin-*; do
+            [ -f "$f" ] || continue
+            shasum -a 256 "$f" > "$f.sha256"
+            cat "$f.sha256"
+          done
+
+      - name: Create GitHub Release (draft)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: 3D model viewer plugin ${{ steps.tag.outputs.tag }}
+          draft: true
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: |
+            dist/ModelViewerPlugin-*-macos-arm64.dylib
+            dist/ModelViewerPlugin-*-macos-arm64.dylib.sha256
+            dist/ModelViewerPlugin-*-linux-x86_64.so
+            dist/ModelViewerPlugin-*-linux-x86_64.so.sha256
+            dist/ModelViewerPlugin-*-windows-x64.dll
+            dist/ModelViewerPlugin-*-windows-x64.dll.sha256
