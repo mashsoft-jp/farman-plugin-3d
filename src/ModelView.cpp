@@ -106,9 +106,12 @@ QMatrix4x4 toQM(const aiMatrix4x4& m) {
                     m.d1, m.d2, m.d3, m.d4);
 }
 
+// 外部テクスチャの実ファイルを探す。FBX には Windows 絶対パスが記録されている
+// ことが多いため、記録パスそのもの → FBX と同じ場所 → ファイル名だけ → textures/
+// サブフォルダ、の順に候補を当たって最初に存在したものの絶対パスを返す。
 QString resolveTexturePath(const QString& fbxPath, const QString& recorded) {
   QString rec = recorded;
-  rec.replace('\\', '/');
+  rec.replace('\\', '/');  // Windows 区切りを正規化
   const QDir        dir(QFileInfo(fbxPath).absolutePath());
   const QString     base = QFileInfo(rec).fileName();
   const QStringList candidates = {rec, dir.absoluteFilePath(rec), dir.absoluteFilePath(base),
@@ -163,37 +166,53 @@ ModelView::~ModelView() {
   delete m_ctx;
 }
 
+// ── マテリアル横断のテクスチャ集計 ──
+// マテリアルごとに独立してテクスチャを持つため、ツールバーや情報ダイアログ用に
+// 「どれか1つでもテクスチャ/埋め込みがあるか」「解決済み/未解決の外部パス一覧」
+// をまとめて返す。パスは重複除去する。
 bool ModelView::hasTexture() const {
-  for (const auto& m : m_materials)
+  for (const auto& m : m_materials) {
     if (m.hasTexture) return true;
+  }
   return false;
 }
 bool ModelView::hasEmbeddedTexture() const {
-  for (const auto& m : m_materials)
+  for (const auto& m : m_materials) {
     if (m.embedded) return true;
+  }
   return false;
 }
+// FBX に記録された外部テクスチャのパス (解決の成否は問わない)。
 QStringList ModelView::recordedTexturePaths() const {
   QStringList out;
-  for (const auto& m : m_materials)
+  for (const auto& m : m_materials) {
     if (m.hasTexture && !m.embedded && !out.contains(m.recordedPath)) out << m.recordedPath;
+  }
   return out;
 }
+// 実ファイルが見つかって読み込めた外部テクスチャの絶対パス。
 QStringList ModelView::resolvedTexturePaths() const {
   QStringList out;
-  for (const auto& m : m_materials)
+  for (const auto& m : m_materials) {
     if (m.resolved && !m.resolvedPath.isEmpty() && !out.contains(m.resolvedPath))
       out << m.resolvedPath;
+  }
   return out;
 }
+// 記録はあるが実ファイルを見つけられなかった外部テクスチャのパス。
 QStringList ModelView::unresolvedTexturePaths() const {
   QStringList out;
-  for (const auto& m : m_materials)
+  for (const auto& m : m_materials) {
     if (m.hasTexture && !m.embedded && !m.resolved && !out.contains(m.recordedPath))
       out << m.recordedPath;
+  }
   return out;
 }
 
+// Assimp でモデルを読み込み、描画に必要な情報を構築する:
+//   ノード階層 → マテリアル/テクスチャ → ジオメトリ+スキンウェイト →
+//   アニメーションチャンネル → スケルトン事前計算 → AABB/自動フィット。
+// aiProcess_PreTransformVertices は使わない (ボーン情報が壊れるため)。
 bool ModelView::loadModel(const QString& path, QString* error) {
   Assimp::Importer importer;
   const unsigned int flags = aiProcess_Triangulate | aiProcess_GenSmoothNormals |
@@ -235,25 +254,33 @@ bool ModelView::loadModel(const QString& path, QString* error) {
     aiColor3D         col(0, 0, 0);
     if (mat->Get(AI_MATKEY_COLOR_DIFFUSE, col) == AI_SUCCESS && (col.r + col.g + col.b) > 0.05f)
       out.baseColor = QVector3D(col.r, col.g, col.b);
+    // ディフューズテクスチャの解決。参照文字列が "*N" なら FBX に埋め込まれた
+    // テクスチャ (aiScene::mTextures[N])、そうでなければ外部ファイルパス。
     aiString tp;
     if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &tp) == AI_SUCCESS && tp.length > 0) {
       out.hasTexture   = true;
       out.recordedPath = QString::fromUtf8(tp.C_Str());
       if (out.recordedPath.startsWith('*')) {
+        // 埋め込みテクスチャ。
         out.embedded  = true;
         const int idx = out.recordedPath.mid(1).toInt();
         if (idx >= 0 && idx < int(scene->mNumTextures)) {
           const aiTexture* t = scene->mTextures[idx];
-          if (t->mHeight == 0)
+          if (t->mHeight == 0) {
+            // 圧縮済み (PNG/JPEG 等) が丸ごと入っている。mWidth はバイト長。
             out.image.loadFromData(reinterpret_cast<const uchar*>(t->pcData), int(t->mWidth));
-          else
+          } else {
+            // 非圧縮の生 BGRA ピクセル (mWidth x mHeight)。QImage は ARGB 順なので
+            // rgbSwapped() で並べ替え、pcData の寿命に依存しないよう copy() する。
             out.image = QImage(reinterpret_cast<const uchar*>(t->pcData), int(t->mWidth),
                                int(t->mHeight), QImage::Format_ARGB32)
                             .rgbSwapped()
                             .copy();
+          }
           out.resolved = !out.image.isNull();
         }
       } else {
+        // 外部ファイル。FBX の場所を基準に探索して読み込む ([resolveTexturePath])。
         out.resolvedPath = resolveTexturePath(path, out.recordedPath);
         if (!out.resolvedPath.isEmpty() && out.image.load(out.resolvedPath)) out.resolved = true;
       }
@@ -315,10 +342,15 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       const aiVector3D& p = mesh->mVertices[v];
       const aiVector3D  n = mesh->HasNormals() ? mesh->mNormals[v] : aiVector3D(0, 0, 1);
       const aiVector3D  t = meshUV ? mesh->mTextureCoords[0][v] : aiVector3D(0, 0, 0);
+      // ボーンウェイトは合計 1 に正規化しておく (シェーダ側は正規化を仮定)。
       std::array<float, 4> w = vwt[v];
       const float          s = w[0] + w[1] + w[2] + w[3];
-      if (s > 0.0f)
-        for (float& x : w) x /= s;
+      if (s > 0.0f) {
+        for (float& x : w) {
+          x /= s;
+        }
+      }
+      // 1 頂点 = 位置3 + 法線3 + UV2 + boneID4 + weight4 = 16 float でインタリーブ。
       verts.insert(verts.end(), {p.x, p.y, p.z, n.x, n.y, n.z, t.x, t.y, vid[v][0], vid[v][1],
                                  vid[v][2], vid[v][3], w[0], w[1], w[2], w[3]});
       lo = QVector3D(std::min(lo.x(), p.x), std::min(lo.y(), p.y), std::min(lo.z(), p.z));
@@ -357,32 +389,40 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       const aiNodeAnim* ch = anim->mChannels[c];
       auto              it = nodeIndex.find(ch->mNodeName.C_Str());
       if (it == nodeIndex.end()) continue;
+      // ノード名でチャンネルを対応付け、位置 / 回転 / スケールのキーフレーム列を貯める。
       Channel& out = m_channels[it->second];
       out.used     = true;
-      for (unsigned int k = 0; k < ch->mNumPositionKeys; ++k)
+      for (unsigned int k = 0; k < ch->mNumPositionKeys; ++k) {
         out.pos.push_back({ch->mPositionKeys[k].mTime,
                            QVector3D(ch->mPositionKeys[k].mValue.x, ch->mPositionKeys[k].mValue.y,
                                      ch->mPositionKeys[k].mValue.z)});
+      }
       for (unsigned int k = 0; k < ch->mNumRotationKeys; ++k) {
         const aiQuaternion& q = ch->mRotationKeys[k].mValue;
         out.rot.push_back({ch->mRotationKeys[k].mTime, QQuaternion(q.w, q.x, q.y, q.z)});
       }
-      for (unsigned int k = 0; k < ch->mNumScalingKeys; ++k)
+      for (unsigned int k = 0; k < ch->mNumScalingKeys; ++k) {
         out.scale.push_back({ch->mScalingKeys[k].mTime,
                              QVector3D(ch->mScalingKeys[k].mValue.x, ch->mScalingKeys[k].mValue.y,
                                        ch->mScalingKeys[k].mValue.z)});
+      }
     }
     m_hasAnim = !m_boneOffset.empty() && m_animDurationTicks > 0.0;
   }
 
-  // スケルトン描画用: ボーンに対応するノード集合と、各ノードの最近ボーン祖先。
+  // スケルトン描画用の事前計算。ボーンに対応するノードに印を付け、各ノードから
+  // 見た「最も近い祖先ボーンノード」を求めておく。これにより、間に挟まる非ボーンの
+  // 変換ノードを飛ばして、ボーン同士だけを線でつなげる (paintEvent のスケルトン描画)。
   m_isBoneNode.assign(m_nodes.size(), 0);
-  for (int bn : m_boneNode)
+  for (int bn : m_boneNode) {
     if (bn >= 0) m_isBoneNode[bn] = 1;
+  }
   m_boneAncestor.assign(m_nodes.size(), -1);
   for (size_t i = 0; i < m_nodes.size(); ++i) {
     int p = m_nodes[i].parent;
-    while (p >= 0 && !m_isBoneNode[p]) p = m_nodes[p].parent;
+    while (p >= 0 && !m_isBoneNode[p]) {
+      p = m_nodes[p].parent;  // ボーンでない親はスキップして遡る
+    }
     m_boneAncestor[i] = p;
   }
   m_jointWorld.clear();
@@ -390,6 +430,10 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   m_vertices = std::move(verts);
   m_indices  = std::move(indices);
 
+  // スキン付きモデルは、静止頂点の AABB では実際に表示されるポーズと大きくずれる
+  // ことがある (バインドポーズと初期ポーズが違う)。そこでバインドポーズのボーン行列で
+  // CPU 側スキニングした頂点位置から AABB を取り直し、自動フィット (中心・半径) が
+  // 破綻しないようにする。頂点フォーマットは 16 float/頂点 (末尾に boneID4 + weight4)。
   if (m_hasAnim) {
     computeBoneMatrices(0.0, /*bindPose=*/true);
     lo = QVector3D(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
@@ -404,12 +448,17 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       if (w0 + w1 + w2 + w3 > 0.0001f) {
         const int  id0 = int(m_vertices[i + 8]), id1 = int(m_vertices[i + 9]),
                   id2 = int(m_vertices[i + 10]), id3 = int(m_vertices[i + 11]);
+        // 4 ボーン加重の線形合成 (シェーダの GPU スキニングと同じ式を CPU で再現)。
         QMatrix4x4 skin;
         skin.fill(0);
         auto add = [&](int id, float w) {
-          if (id >= 0 && id < int(m_boneMatrices.size()))
-            for (int r = 0; r < 4; ++r)
-              for (int c = 0; c < 4; ++c) skin(r, c) += w * m_boneMatrices[id](r, c);
+          if (id >= 0 && id < int(m_boneMatrices.size())) {
+            for (int r = 0; r < 4; ++r) {
+              for (int c = 0; c < 4; ++c) {
+                skin(r, c) += w * m_boneMatrices[id](r, c);
+              }
+            }
+          }
         };
         add(id0, w0);
         add(id1, w1);
@@ -455,27 +504,38 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   return true;
 }
 
+// 指定時刻のスケルトン姿勢を計算する。
+//  1. 各ノードのローカル変換を求める (bindPose ならバインド姿勢そのまま、
+//     アニメ時はキーフレームを補間した T*R*S)。
+//  2. 親から順に掛けてノードのグローバル変換を得る (m_nodes は DFS 前順なので、
+//     ループ内で親は必ず計算済み)。
+//  3. スケルトン描画用にノードのワールド座標 m_jointWorld を保存。
+//  4. 各ボーンの最終スキニング行列 = globalInverse * nodeGlobal * boneOffset を作る
+//     (シェーダ uBones に渡す)。
 void ModelView::computeBoneMatrices(double timeTicks, bool bindPose) {
   const size_t            n = m_nodes.size();
   std::vector<QMatrix4x4> global(n);
   for (size_t i = 0; i < n; ++i) {
     QMatrix4x4 local = m_nodes[i].bind;
     if (!bindPose && i < m_channels.size() && m_channels[i].used) {
+      // 位置・スケールは線形補間、回転は球面線形補間 (slerp) する。
       const QVector3D   bindT = m_nodes[i].bind.column(3).toVector3D();
       const QVector3D   p     = interpKeys(m_channels[i].pos, timeTicks, bindT);
       const QQuaternion q =
           m_channels[i].rot.empty()
               ? QQuaternion()
               : [&] {
+                  // 回転キーを挟む 2 点を探して slerp。範囲外は端をクランプ。
                   const auto& keys = m_channels[i].rot;
                   if (keys.size() == 1 || timeTicks <= keys.front().t) return keys.front().q;
                   if (timeTicks >= keys.back().t) return keys.back().q;
-                  for (size_t k = 0; k + 1 < keys.size(); ++k)
+                  for (size_t k = 0; k + 1 < keys.size(); ++k) {
                     if (timeTicks < keys[k + 1].t) {
                       const float f =
                           float((timeTicks - keys[k].t) / (keys[k + 1].t - keys[k].t));
                       return QQuaternion::slerp(keys[k].q, keys[k + 1].q, f);
                     }
+                  }
                   return keys.back().q;
                 }();
       const QVector3D s = interpKeys(m_channels[i].scale, timeTicks, QVector3D(1, 1, 1));
@@ -484,12 +544,15 @@ void ModelView::computeBoneMatrices(double timeTicks, bool bindPose) {
       local.rotate(q);
       local.scale(s);
     }
+    // 親 (m_nodes[i].parent) は前順走査で計算済みなので、そのまま合成できる。
     global[i] = (m_nodes[i].parent < 0) ? local : global[m_nodes[i].parent] * local;
   }
-  // スケルトン描画用にノードのワールド座標を保存。
+  // スケルトン描画用にノードのワールド座標を保存 (行列の平行移動成分 = 原点の位置)。
   m_jointWorld.resize(n);
-  for (size_t i = 0; i < n; ++i)
+  for (size_t i = 0; i < n; ++i) {
     m_jointWorld[i] = (m_globalInverse * global[i]).column(3).toVector3D();
+  }
+  // 各ボーンの最終スキニング行列。boneOffset はメッシュ空間→ボーン空間の逆バインド。
   m_boneMatrices.resize(m_boneOffset.size());
   for (size_t b = 0; b < m_boneOffset.size(); ++b) {
     const int        node = m_boneNode[b];
@@ -595,6 +658,8 @@ void ModelView::setAnimationTime(double sec) {
   renderFrame();
 }
 
+// 描画用の隠し OpenGL コンテキストとオフスクリーンサーフェスを (初回のみ) 用意する。
+// OpenGL 3.3 Core / 深度バッファ付き。作成失敗時は false を返し描画をスキップする。
 bool ModelView::ensureContext() {
   if (m_ctx && m_ctx->isValid()) return m_surface && m_surface->isValid();
   QSurfaceFormat fmt;
@@ -634,6 +699,9 @@ void ModelView::ensureGLResources() {
   m_glResourcesReady = true;
 }
 
+// 頂点/インデックス/テクスチャ/グリッド線を GPU に (変更時のみ) アップロードする。
+// makeCurrent 済みで呼ぶこと。属性レイアウトは kFloatsPerVertex に対応 (0:位置3 /
+// 1:法線3 / 2:UV2 / 3:boneID4 / 4:weight4)。
 void ModelView::uploadIfNeeded() {
   if (!m_uploaded && !m_vertices.empty()) {
     m_vao.bind();
@@ -683,6 +751,10 @@ void ModelView::uploadIfNeeded() {
   }
 }
 
+// 1 フレームをオフスクリーン (隠し context + FBO) に描画し、結果を QImage
+// (m_frame) に取り出して update() で paintEvent に表示させる。ネイティブ GL 面を
+// ウィジェットに持たせないため、macOS で QStackedWidget 等に埋め込んでも黒化しない
+// (詳細は ModelView.h の冒頭コメント)。
 void ModelView::renderFrame() {
   if (!m_hasModel || width() <= 0 || height() <= 0) return;
   if (!ensureContext()) return;
