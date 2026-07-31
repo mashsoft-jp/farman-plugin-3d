@@ -88,12 +88,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/assimp-install
-          key: assimp-${{ env.ASSIMP_VERSION }}-${{ runner.os }}-static-v1
+          key: assimp-${{ env.ASSIMP_VERSION }}-${{ runner.os }}-static-v2
 
       - name: Build assimp (static, Unix)
         if: runner.os != 'Windows' && steps.cache-assimp.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # zlib の扱い:
+          #  - Linux: システムの static libz.a は非 PIC で、共有モジュール (.so)
+          #    にリンクできない (relocation R_X86_64_PC32 ... recompile with -fPIC)。
+          #    そのため PIC でビルドした同梱 zlib を使う。
+          #  - macOS: 同梱 zlib が新しい SDK でビルドできない (contrib/zlib が
+          #    _stdio.h と衝突) ため、システム zlib (libz.tbd, 共有スタブ) を使う。
+          ZLIB_ARGS=()
+          if [ "$RUNNER_OS" = "Linux" ]; then ZLIB_ARGS+=(-DASSIMP_BUILD_ZLIB=ON); fi
           git clone --depth 1 --branch "${ASSIMP_VERSION}" \
             https://github.com/assimp/assimp.git "$RUNNER_TEMP/assimp-src"
           cmake -S "$RUNNER_TEMP/assimp-src" -B "$RUNNER_TEMP/assimp-build" \
@@ -106,6 +114,7 @@ jobs:
             -DASSIMP_INSTALL=ON \
             -DASSIMP_NO_EXPORT=ON \
             -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+            "${ZLIB_ARGS[@]}" \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/assimp-install"
           cmake --build "$RUNNER_TEMP/assimp-build" --config Release --parallel 3
           cmake --install "$RUNNER_TEMP/assimp-build" --config Release
