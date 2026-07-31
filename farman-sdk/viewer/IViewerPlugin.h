@@ -59,6 +59,25 @@ struct PluginContext {
 // ディレクトリ / 保持日数の変更にも追従させること。
 void syncPluginFromHostSettings();
 
+// 必要な farman 本体の最小バージョン (MinHostVersion) について
+// ------------------------------------------------------------------
+// プラグインが本体側の機能・同梱ライブラリ (例: libQt6OpenGL) を前提とする場合、
+// Q_PLUGIN_METADATA の FILE json に必要な本体最小バージョンを宣言できる:
+//
+//   // plugin.cpp/h
+//   Q_PLUGIN_METADATA(IID FarmanIViewerPlugin_iid FILE "metadata.json")
+//
+//   // metadata.json
+//   { "MinHostVersion": "0.9.9" }
+//
+// farman は各プラグインをロードする「前」に QPluginLoader::metaData() で
+// MetaData.MinHostVersion を読み、本体バージョン (数値部のみで比較、prerelease は
+// 無視) がそれ未満なら instance() を呼ばずにスキップし、Settings > Plugins に
+// 「要 farman X 以降」と表示する。バイナリが依存不足で dlopen 失敗するケースでも、
+// メタデータはコード解決前に読めるため、原因の分かる形で弾ける。宣言が無ければ
+// 従来どおり無条件にロードを試みる。実行時のより細かい判定には PluginContext の
+// farmanVersion も使える。
+
 // ビュアープラグインのインターフェース。
 // IID は `com.farman.IViewerPlugin/<major>.<minor>` 形式。互換性のない変更時に
 // メジャー番号を上げ、Dispatcher で両方のバージョンを試すことで段階移行する。

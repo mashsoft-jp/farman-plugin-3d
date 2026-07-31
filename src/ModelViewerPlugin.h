@@ -16,7 +16,11 @@ namespace Farman {
 // 依存するため vendoring せず、version() / canHandle() はここで override する。
 class ModelViewerPlugin : public QObject, public IViewerPlugin {
   Q_OBJECT
-  Q_PLUGIN_METADATA(IID FarmanIViewerPlugin_iid)
+  // metadata.json の "MinHostVersion" で必要な farman 本体の最小バージョンを宣言。
+  // 本プラグインは libQt6OpenGL を要求するため、それを同梱する farman 0.9.9 以降が
+  // 必要。farman はロード前にこの値を読み、満たさなければ実用的な理由を出して
+  // スキップする (farman-sdk/viewer/IViewerPlugin.h の MinHostVersion 節を参照)。
+  Q_PLUGIN_METADATA(IID FarmanIViewerPlugin_iid FILE "metadata.json")
   Q_INTERFACES(Farman::IViewerPlugin)
 
 public:
