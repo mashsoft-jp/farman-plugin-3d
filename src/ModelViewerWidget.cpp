@@ -3,6 +3,7 @@
 #include "ModelView.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFont>
@@ -10,6 +11,7 @@
 #include <QIcon>
 #include <QLabel>
 #include <QPainter>
+#include <QPalette>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QSizePolicy>
@@ -134,6 +136,32 @@ QIcon makeIcon(Glyph g, const QColor& c) {
   return QIcon(pm);
 }
 
+// farman 本体のビュアーツールバーと同じ見た目 (ホバー / 押下[checked] / フォーカス枠)
+// にするための QSS。本体 src/utils/EnterClickFilter.h の toolbarStyleSheet() と
+// 同じ計算・同じセレクタを、プラグインから参照できないため複製している。これを
+// 当てないと Windows 既定スタイルの青い checked 背景になり、他ビュアーと見た目が
+// ずれる。現在のパレットから色を計算して埋め込む。
+QString toolbarStyleSheet() {
+  const QPalette pal = qApp ? qApp->palette() : QPalette();
+  const QColor   win = pal.color(QPalette::Active, QPalette::Window);
+  const bool     dark = win.lightness() < 128;
+  const QColor   hover        = dark ? win.lighter(140) : win.darker(106);
+  const QColor   checked      = dark ? win.lighter(175) : win.darker(112);
+  const QColor   checkedHover = dark ? win.lighter(195) : win.darker(117);
+  const QColor   focusBorder  = pal.color(QPalette::Active, QPalette::Highlight);
+  QString s;
+  s += QStringLiteral("QToolBar { background-color: %1; border: 0px; }").arg(win.name());
+  s += QStringLiteral(
+           "QToolButton { padding: 3px; border: 1px solid transparent; border-radius: 3px; }"
+           "QToolButton:hover { background-color: %1; }"
+           "QToolButton:checked { background-color: %2; }"
+           "QToolButton:checked:hover { background-color: %3; }"
+           "QToolButton:focus { border: 2px solid %4; padding: 2px; }"
+           "QToolButton:checked:focus { background-color: %2; border: 2px solid %4; padding: 2px; }")
+           .arg(hover.name(), checked.name(), checkedHover.name(), focusBorder.name());
+  return s;
+}
+
 } // namespace
 
 ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
@@ -145,6 +173,8 @@ ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
   m_toolbar->setMovable(false);
   m_toolbar->setFloatable(false);
   m_toolbar->setIconSize(QSize(20, 20));
+  // 本体ビュアーと同じツールバー見た目 (ホバー/押下/フォーカス枠) に揃える。
+  m_toolbar->setStyleSheet(toolbarStyleSheet());
   m_view = new ModelView(this);
 
   lay->addWidget(m_toolbar);

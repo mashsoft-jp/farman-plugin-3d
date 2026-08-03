@@ -6,6 +6,7 @@
 // プラグイン (ModelViewerPlugin::createViewer) はこのウィジェットを返す。
 
 #include <QImage>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -28,6 +29,10 @@ public:
   explicit ModelViewerWidget(QWidget* parent = nullptr);
 
   bool loadModel(const QString& path, QString* error = nullptr);
+
+  // 独立ウィンドウ (External) で開かれたときに小さくならないよう、妥当な初期サイズを
+  // 返す (ホストが明示 resize しない経路のための既定)。
+  QSize sizeHint() const override { return QSize(880, 640); }
 
   // ── 委譲 (PoC / ホスト用) ──
   QImage      renderToImage();
