@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QWidget>
 #include <QtPlugin>
+#include "keybinding/ViewerCommands.h"  // ViewerCommandDef（shortcutCommands の戻り値）
 
 namespace Farman {
 
@@ -83,7 +84,7 @@ void syncPluginFromHostSettings();
 // メジャー番号を上げ、Dispatcher で両方のバージョンを試すことで段階移行する。
 // プラグイン側の Q_PLUGIN_METADATA でも必ずこのマクロを使うこと
 // (文字列を直書きすると IID 更新時に追従漏れする)。
-#define FarmanIViewerPlugin_iid "com.farman.IViewerPlugin/4.0"
+#define FarmanIViewerPlugin_iid "com.farman.IViewerPlugin/5.0"
 class IPluginSettingsPage;  // IPluginSettingsPage.h
 class IViewerPlugin {
 public:
@@ -143,6 +144,13 @@ public:
   virtual IPluginSettingsPage* createSettingsPage(QWidget* /*parent*/) {
     return nullptr;
   }
+
+  // このビュアーが持つ「設定可能なショートカット」の一覧を返す取得 API。
+  // 本体 (Settings → キーバインド) がこれを呼んで一覧表示・編集する。既定は空。
+  // 割り当ての保存は本体が一括で行い、変更結果は createViewer で返したビューの
+  // Q_INVOKABLE applyShortcutBindings(QVariantMap) へ本体から push される
+  // (データフローは本体→ビュアーの一方通行)。
+  virtual QList<ViewerCommandDef> shortcutCommands() const { return {}; }
 
   // 拡張子の紐付けを自前の設定ページ内で編集する場合は true を返す。
   // farman は Settings → Plugins → 詳細でホスト側の「拡張子」欄を出さず、

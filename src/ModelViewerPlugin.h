@@ -7,7 +7,7 @@
 namespace Farman {
 
 // 3D モデル (.fbx) を表示する farman 用の外部ビュアープラグイン。
-// IViewerPlugin (IID com.farman.IViewerPlugin/4.0) を実装する。farman 本体には
+// IViewerPlugin (IID com.farman.IViewerPlugin/5.0) を実装する。farman 本体には
 // 同梱せず外部配布し、ユーザーが外部プラグインディレクトリ
 // <AppData>/plugins/viewers/ に置くと farman が起動時に動的ロードする。
 //
