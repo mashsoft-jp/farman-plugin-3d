@@ -993,7 +993,11 @@ void ModelView::wheelEvent(QWheelEvent* e) {
   renderFrame();
 }
 
-void ModelView::keyPressEvent(QKeyEvent* e) {
+void ModelView::applyShortcutBindings(const QVariantMap& bindings) {
+  m_shortcuts.applyBindings(bindings);
+}
+
+bool ModelView::dispatchShortcut(const QString& cmd) {
   const float rot = 0.10f;                          // 回転ステップ (rad)
   const float pan = std::max(m_radius, 1e-3f) * 0.06f;  // 平行移動ステップ (world)
   // カメラの右 / 上ベクトル (平行移動用)
@@ -1003,35 +1007,56 @@ void ModelView::keyPressEvent(QKeyEvent* e) {
   const QVector3D right = QVector3D::crossProduct(fwd, QVector3D(0, 1, 0)).normalized();
   const QVector3D up    = QVector3D::crossProduct(right, fwd).normalized();
 
-  switch (e->key()) {
-    // 回転 (矢印)
-    case Qt::Key_Left:  m_yaw -= rot; renderFrame(); return;
-    case Qt::Key_Right: m_yaw += rot; renderFrame(); return;
-    case Qt::Key_Up:    m_pitch = std::clamp(m_pitch + rot, -1.53f, 1.53f); renderFrame(); return;
-    case Qt::Key_Down:  m_pitch = std::clamp(m_pitch - rot, -1.53f, 1.53f); renderFrame(); return;
-    // 平行移動 (WASD)
-    case Qt::Key_W: m_pan += up * pan; renderFrame(); return;
-    case Qt::Key_S: m_pan -= up * pan; renderFrame(); return;
-    case Qt::Key_A: m_pan -= right * pan; renderFrame(); return;
-    case Qt::Key_D: m_pan += right * pan; renderFrame(); return;
-    // 拡大縮小 (U/J)
-    case Qt::Key_U: m_dist = std::clamp(m_dist * 0.9f, 0.2f, 40.0f); renderFrame(); return;
-    case Qt::Key_J: m_dist = std::clamp(m_dist * 1.1f, 0.2f, 40.0f); renderFrame(); return;
-    // リセット / 情報 / その他トグル
-    case Qt::Key_R: resetView(); return;
-    case Qt::Key_I: emit infoRequested(); return;
-    case Qt::Key_T: setTextureEnabled(!m_texEnabled); return;
-    case Qt::Key_G: setShowGrid(!m_showGrid); return;
-    case Qt::Key_F: setWireframe(!m_wireframe); return;
-    case Qt::Key_B: if (!m_boneOffset.empty()) setShowBones(!m_showBones); return;
-    case Qt::Key_H: setShowHelp(!m_showHelp); return;
-    case Qt::Key_Space:
-      if (m_hasAnim) {
-        setAnimationPlaying(!m_playing);
-        return;
-      }
-      break;
-    default: break;
+  // 回転 (既定: 矢印)
+  if (cmd == QLatin1String("viewer.model.rotate_left"))  { m_yaw -= rot; renderFrame(); return true; }
+  if (cmd == QLatin1String("viewer.model.rotate_right")) { m_yaw += rot; renderFrame(); return true; }
+  if (cmd == QLatin1String("viewer.model.rotate_up")) {
+    m_pitch = std::clamp(m_pitch + rot, -1.53f, 1.53f); renderFrame(); return true;
+  }
+  if (cmd == QLatin1String("viewer.model.rotate_down")) {
+    m_pitch = std::clamp(m_pitch - rot, -1.53f, 1.53f); renderFrame(); return true;
+  }
+  // 平行移動 (既定: WASD)
+  if (cmd == QLatin1String("viewer.model.pan_up"))    { m_pan += up * pan;    renderFrame(); return true; }
+  if (cmd == QLatin1String("viewer.model.pan_down"))  { m_pan -= up * pan;    renderFrame(); return true; }
+  if (cmd == QLatin1String("viewer.model.pan_left"))  { m_pan -= right * pan; renderFrame(); return true; }
+  if (cmd == QLatin1String("viewer.model.pan_right")) { m_pan += right * pan; renderFrame(); return true; }
+  // 拡大縮小 (既定: U/J)
+  if (cmd == QLatin1String("viewer.model.zoom_in")) {
+    m_dist = std::clamp(m_dist * 0.9f, 0.2f, 40.0f); renderFrame(); return true;
+  }
+  if (cmd == QLatin1String("viewer.model.zoom_out")) {
+    m_dist = std::clamp(m_dist * 1.1f, 0.2f, 40.0f); renderFrame(); return true;
+  }
+  // リセット / 情報 / 各種トグル
+  if (cmd == QLatin1String("viewer.model.reset")) { resetView(); return true; }
+  if (cmd == QLatin1String("viewer.model.info"))  { emit infoRequested(); return true; }
+  if (cmd == QLatin1String("viewer.model.toggle_texture"))   { setTextureEnabled(!m_texEnabled); return true; }
+  if (cmd == QLatin1String("viewer.model.toggle_grid"))      { setShowGrid(!m_showGrid); return true; }
+  if (cmd == QLatin1String("viewer.model.toggle_wireframe")) { setWireframe(!m_wireframe); return true; }
+  if (cmd == QLatin1String("viewer.model.toggle_bones")) {
+    if (!m_boneOffset.empty()) {
+      setShowBones(!m_showBones);
+    }
+    return true;
+  }
+  if (cmd == QLatin1String("viewer.model.toggle_help")) { setShowHelp(!m_showHelp); return true; }
+  if (cmd == QLatin1String("viewer.model.toggle_animation")) {
+    if (m_hasAnim) {
+      setAnimationPlaying(!m_playing);
+      return true;
+    }
+    return false;  // アニメーションが無ければ未処理 (基底へ委譲)
+  }
+  return false;
+}
+
+void ModelView::keyPressEvent(QKeyEvent* e) {
+  // ショートカットは本体キーバインド設定から push された割り当て (m_shortcuts) で
+  // 引く。未割り当て / 未対応なら基底へ委譲する。
+  const QString cmd = m_shortcuts.commandForSeq(ViewerShortcutMap::sequenceForEvent(e));
+  if (!cmd.isEmpty() && dispatchShortcut(cmd)) {
+    return;
   }
   QWidget::keyPressEvent(e);
 }

@@ -23,8 +23,10 @@
 #include <QSize>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QVector3D>
 #include <QWidget>
+#include "viewer/ViewerShortcutMap.h"
 
 #include <memory>
 #include <vector>
@@ -97,7 +99,15 @@ protected:
   void wheelEvent(QWheelEvent* e) override;
   void keyPressEvent(QKeyEvent* e) override;
 
+public:
+  // 本体 (設定 → キーバインド) からショートカット割り当てを push で受け取る。
+  // bindings は commandId -> キー文字列リスト。QMetaObject::invokeMethod で
+  // 本体から一様に呼べるよう Q_INVOKABLE。
+  Q_INVOKABLE void applyShortcutBindings(const QVariantMap& bindings);
+
 private:
+  // commandId (viewer.model.*) に対応する操作を実行。処理したら true。
+  bool dispatchShortcut(const QString& commandId);
   bool ensureContext();
   void ensureGLResources();
   void uploadIfNeeded();
@@ -204,6 +214,9 @@ private:
   float     m_dist  = 2.6f;
   QVector3D m_pan{0, 0, 0};  // 平行移動 (ワールド)
   QPoint    m_lastPos;
+
+  // 本体から push されたショートカット割り当て (ローカル保持。ストレージは読まない)。
+  ViewerShortcutMap m_shortcuts;
 
   // 表示補助 (右上ギズモ / 情報テキスト)
   QStringList m_infoLines;

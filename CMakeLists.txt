@@ -40,6 +40,7 @@ qt_add_plugin(ModelViewerPlugin
   src/ModelViewerWidget.cpp
   src/ModelView.cpp
   farman-sdk/viewer/IViewerPlugin.cpp
+  farman-sdk/viewer/ViewerShortcutMap.cpp
 )
 
 set_target_properties(ModelViewerPlugin PROPERTIES
@@ -82,9 +83,11 @@ if(FARMAN3D_BUILD_POC)
     tools/model_poc/main.cpp
     src/ModelViewerWidget.cpp
     src/ModelView.cpp
+    farman-sdk/viewer/ViewerShortcutMap.cpp
   )
   set_target_properties(model_poc PROPERTIES AUTOMOC ON)
-  target_include_directories(model_poc PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_include_directories(model_poc PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/farman-sdk)
   target_link_libraries(model_poc PRIVATE
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL)
   if(assimp_FOUND)

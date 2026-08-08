@@ -47,6 +47,12 @@ public:
   bool     canHandle(const QString& filePath) const override;
   QWidget* createViewer(const QString& filePath, QWidget* parent,
                         const PluginContext& ctx) override;
+
+  // 本体 (設定 → キーバインド) で編集できる、この 3D ビュアーの設定可能ショート
+  // カット一覧を返す取得 API。viewerId は "model"。既定キーは ModelView の従来
+  // 直書きと同じ。割り当て結果は createViewer が返すビューの
+  // Q_INVOKABLE applyShortcutBindings(QVariantMap) へ本体から push される。
+  QList<ViewerCommandDef> shortcutCommands() const override;
 };
 
 } // namespace Farman
