@@ -1,8 +1,12 @@
 #include "ModelViewerPlugin.h"
 
+#include "ModelView.h"
 #include "ModelViewerWidget.h"
 
 #include <QFileInfo>
+#include <QKeySequence>
+#include <QStringList>
+#include <QVariantMap>
 
 namespace Farman {
 
@@ -47,6 +51,22 @@ QWidget* ModelViewerPlugin::createViewer(const QString& filePath, QWidget* paren
   if (!widget->loadModel(filePath, &err)) {
     // 読み込み失敗でもウィジェットは返す (空の 3D ビュー)。呼び出し側が所有。
     qWarning("ModelViewerPlugin: load failed: %s", qPrintable(err));
+  }
+  // 既定キーで初期化しておく。本体 (対応版 farman) が applyShortcutBindings で
+  // ユーザー割り当てを push すれば上書きされる。push が来ない環境 (未対応 farman
+  // 等) でも、既定キーで 3D 操作が効くようにするための保険。
+  if (ModelView* mv = widget->view()) {
+    QVariantMap defaults;
+    for (const ViewerCommandDef& d : shortcutCommands()) {
+      QStringList keys;
+      for (const QKeySequence& k : d.defaultKeys) {
+        if (!k.isEmpty()) {
+          keys << k.toString(QKeySequence::PortableText);
+        }
+      }
+      defaults.insert(d.commandId, keys);
+    }
+    mv->applyShortcutBindings(defaults);
   }
   return widget;
 }
