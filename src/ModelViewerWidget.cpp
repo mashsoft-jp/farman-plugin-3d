@@ -23,7 +23,7 @@ namespace Farman {
 
 namespace {
 
-enum class Glyph { Texture, Grid, Wire, Bones, Play, Pause, Reset, Help, Info };
+enum class Glyph { Texture, Grid, Wire, Cull, Bones, Play, Pause, Reset, Help, Info };
 
 void drawGlyph(QPainter& p, Glyph g, const QColor& c) {
   p.setRenderHint(QPainter::Antialiasing, true);
@@ -58,6 +58,19 @@ void drawGlyph(QPainter& p, Glyph g, const QColor& c) {
       p.drawLine(b, c);
       p.drawLine(c, a);
       p.drawLine(a, QPointF(9, 15));  // 内部分割線でメッシュ感を出す
+      break;
+    }
+    case Glyph::Cull: {  // 表面 (塗り) と裏面 (破線) の 2 枚の板 = 裏面カリング
+      p.setPen(pen);
+      p.setBrush(Qt::NoBrush);
+      QPen dashed = pen;
+      dashed.setStyle(Qt::DashLine);
+      dashed.setWidthF(1.2);
+      p.setPen(dashed);
+      p.drawRect(QRectF(6.5, 3.5, 8, 8));  // 奥 (裏面) は破線
+      p.setPen(Qt::NoPen);
+      p.setBrush(c);
+      p.drawRect(QRectF(3, 7, 8, 8));      // 手前 (表面) は塗り
       break;
     }
     case Glyph::Bones: {  // 関節線 + 関節点 (スケルトン)
@@ -211,6 +224,16 @@ ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
   connect(m_view, &ModelView::wireframeChanged, this, [this](bool on) {
     QSignalBlocker b(m_actWire);
     m_actWire->setChecked(on);
+  });
+
+  m_actCull = m_toolbar->addAction(makeIcon(Glyph::Cull, ic), QString());
+  m_actCull->setCheckable(true);
+  m_actCull->setChecked(true);
+  m_actCull->setToolTip(QStringLiteral("裏面カリング (裏面を描かない。Unity 等と同じ片面表示) (C)"));
+  connect(m_actCull, &QAction::toggled, m_view, &ModelView::setCullBackface);
+  connect(m_view, &ModelView::cullBackfaceChanged, this, [this](bool on) {
+    QSignalBlocker b(m_actCull);
+    m_actCull->setChecked(on);
   });
 
   m_actBones = m_toolbar->addAction(makeIcon(Glyph::Bones, ic), QString());

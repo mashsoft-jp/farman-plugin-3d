@@ -1,6 +1,6 @@
 #pragma once
 
-// 3D モデルビュアーの外枠。上部にツールバー (テクスチャ ON/OFF・グリッド・情報・
+// 3D モデルビュアーの外枠。上部にツールバー (テクスチャ ON/OFF・グリッド・裏面カリング・情報・
 // 再生・リセット + 外部テクスチャのパス表示) を持ち、下に ModelView (描画) を置く。
 // farman の他ビュアーと同様に「ビュアー上部のツールバー」で操作できるようにする。
 // プラグイン (ModelViewerPlugin::createViewer) はこのウィジェットを返す。
@@ -59,6 +59,7 @@ private:
   QAction*        m_actTexture = nullptr;
   QAction*        m_actGrid    = nullptr;
   QAction*        m_actWire    = nullptr;
+  QAction*        m_actCull    = nullptr;
   QAction*        m_actBones   = nullptr;
   QAction*        m_actHelp    = nullptr;
   QAction*        m_actPlay    = nullptr;

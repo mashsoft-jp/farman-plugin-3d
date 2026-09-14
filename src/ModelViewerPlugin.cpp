@@ -38,6 +38,7 @@ QList<ViewerCommandDef> ModelViewerPlugin::shortcutCommands() const {
     def("toggle_texture",   QStringLiteral("テクスチャ表示の切り替え"), Qt::Key_T),
     def("toggle_grid",      QStringLiteral("グリッド表示の切り替え"),   Qt::Key_G),
     def("toggle_wireframe", QStringLiteral("ワイヤーフレーム表示の切り替え"), Qt::Key_F),
+    def("toggle_backface",  QStringLiteral("裏面カリングの切り替え"),   Qt::Key_C),
     def("toggle_bones",     QStringLiteral("ボーン表示の切り替え"),     Qt::Key_B),
     def("toggle_help",      QStringLiteral("ヘルプ表示の切り替え"),     Qt::Key_H),
     def("toggle_animation", QStringLiteral("アニメーション再生 / 一時停止"), Qt::Key_Space),

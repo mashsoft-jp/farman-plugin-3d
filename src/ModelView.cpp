@@ -229,15 +229,20 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   // ── ノード階層 (DFS 前順) ──
   m_nodes.clear();
   std::unordered_map<std::string, int> nodeIndex;
+  std::vector<const aiNode*>           nodePtr;     // m_nodes と同順の aiNode
+  std::vector<QMatrix4x4>              nodeGlobal;  // 各ノードのグローバル (ルート基準) 変換
   {
     struct Item { const aiNode* n; int parent; };
     std::vector<Item> stack{{scene->mRootNode, -1}};
     while (!stack.empty()) {
       Item it = stack.back();
       stack.pop_back();
-      const int idx = int(m_nodes.size());
-      m_nodes.push_back({QString::fromUtf8(it.n->mName.C_Str()), toQM(it.n->mTransformation),
-                         it.parent});
+      const int        idx   = int(m_nodes.size());
+      const QMatrix4x4 local = toQM(it.n->mTransformation);
+      m_nodes.push_back({QString::fromUtf8(it.n->mName.C_Str()), local, it.parent});
+      nodePtr.push_back(it.n);
+      // 前順走査なので親のグローバル変換は計算済み。
+      nodeGlobal.push_back(it.parent < 0 ? local : nodeGlobal[it.parent] * local);
       nodeIndex[it.n->mName.C_Str()] = idx;
       for (int c = int(it.n->mNumChildren) - 1; c >= 0; --c)
         stack.push_back({it.n->mChildren[c], idx});
@@ -303,73 +308,94 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   m_boneNode.clear();
   std::unordered_map<std::string, int> boneId;
 
-  for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
-    const aiMesh* mesh   = scene->mMeshes[mi];
-    const bool    meshUV = mesh->HasTextureCoords(0);
-    anyUV                = anyUV || meshUV;
-    const unsigned int base = static_cast<unsigned int>(verts.size() / ModelView::kFloatsPerVertex);
-    const int          subStart = int(indices.size());
+  // メッシュは aiScene::mMeshes を直接並べるのではなく、ノード階層をたどって
+  // 「各ノードが参照するメッシュ」を、そのノードのグローバル変換を頂点に焼き込んで
+  // 追加する。FBX (DCC ツール出力) では同じ形状を複数ノードから参照 (インスタンス
+  // 配置) し、位置・回転・スケールはノード側が持つのが普通で、これを無視すると全部が
+  // 原点に重なって Unity Editor 等の見た目と一致しない。スキン付きメッシュは
+  // ボーン行列 (offset 行列にメッシュノードの変換を含む) が配置を担うので変換しない。
+  // 鏡像変換 (行列式 < 0) は面の向きが反転するので、インデックス順を入れ替えて
+  // 表裏 (CCW) を保つ。
+  for (size_t ni = 0; ni < nodePtr.size(); ++ni) {
+    const aiNode* node = nodePtr[ni];
+    for (unsigned int mr = 0; mr < node->mNumMeshes; ++mr) {
+      const unsigned int mi = node->mMeshes[mr];
+      if (mi >= scene->mNumMeshes) continue;
+      const aiMesh*    mesh    = scene->mMeshes[mi];
+      const bool       skinned = mesh->mNumBones > 0;
+      const QMatrix4x4 xf      = skinned ? QMatrix4x4() : nodeGlobal[ni];
+      const QMatrix4x4 nxf     = xf.inverted().transposed();  // 法線用 (逆転置)
+      const bool       mirror  = !skinned && xf.determinant() < 0.0;
+      const bool    meshUV = mesh->HasTextureCoords(0);
+      anyUV                = anyUV || meshUV;
+      const unsigned int base = static_cast<unsigned int>(verts.size() / ModelView::kFloatsPerVertex);
+      const int          subStart = int(indices.size());
 
-    std::vector<std::array<float, 4>> vid(mesh->mNumVertices, {0, 0, 0, 0});
-    std::vector<std::array<float, 4>> vwt(mesh->mNumVertices, {0, 0, 0, 0});
-    std::vector<int>                  cnt(mesh->mNumVertices, 0);
-    for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
-      const aiBone*     bone = mesh->mBones[b];
-      const std::string name = bone->mName.C_Str();
-      int               id;
-      auto              it = boneId.find(name);
-      if (it == boneId.end()) {
-        id           = int(m_boneOffset.size());
-        boneId[name] = id;
-        m_boneOffset.push_back(toQM(bone->mOffsetMatrix));
-        auto ni = nodeIndex.find(name);
-        m_boneNode.push_back(ni == nodeIndex.end() ? -1 : ni->second);
-      } else {
-        id = it->second;
-      }
-      for (unsigned int w = 0; w < bone->mNumWeights; ++w) {
-        const unsigned int v  = bone->mWeights[w].mVertexId;
-        const float        wt = bone->mWeights[w].mWeight;
-        if (cnt[v] < 4) {
-          vid[v][cnt[v]] = float(id);
-          vwt[v][cnt[v]] = wt;
-          ++cnt[v];
+      std::vector<std::array<float, 4>> vid(mesh->mNumVertices, {0, 0, 0, 0});
+      std::vector<std::array<float, 4>> vwt(mesh->mNumVertices, {0, 0, 0, 0});
+      std::vector<int>                  cnt(mesh->mNumVertices, 0);
+      for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
+        const aiBone*     bone = mesh->mBones[b];
+        const std::string name = bone->mName.C_Str();
+        int               id;
+        auto              it = boneId.find(name);
+        if (it == boneId.end()) {
+          id           = int(m_boneOffset.size());
+          boneId[name] = id;
+          m_boneOffset.push_back(toQM(bone->mOffsetMatrix));
+            auto found = nodeIndex.find(name);
+          m_boneNode.push_back(found == nodeIndex.end() ? -1 : found->second);
+        } else {
+          id = it->second;
+        }
+        for (unsigned int w = 0; w < bone->mNumWeights; ++w) {
+          const unsigned int v  = bone->mWeights[w].mVertexId;
+          const float        wt = bone->mWeights[w].mWeight;
+          if (cnt[v] < 4) {
+            vid[v][cnt[v]] = float(id);
+            vwt[v][cnt[v]] = wt;
+            ++cnt[v];
+          }
         }
       }
-    }
 
-    for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
-      const aiVector3D& p = mesh->mVertices[v];
-      const aiVector3D  n = mesh->HasNormals() ? mesh->mNormals[v] : aiVector3D(0, 0, 1);
-      const aiVector3D  t = meshUV ? mesh->mTextureCoords[0][v] : aiVector3D(0, 0, 0);
-      // ボーンウェイトは合計 1 に正規化しておく (シェーダ側は正規化を仮定)。
-      std::array<float, 4> w = vwt[v];
-      const float          s = w[0] + w[1] + w[2] + w[3];
-      if (s > 0.0f) {
-        for (float& x : w) {
-          x /= s;
+      for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+        const aiVector3D& p0 = mesh->mVertices[v];
+        const aiVector3D  n0 = mesh->HasNormals() ? mesh->mNormals[v] : aiVector3D(0, 0, 1);
+        const aiVector3D  t  = meshUV ? mesh->mTextureCoords[0][v] : aiVector3D(0, 0, 0);
+        // ノード変換を頂点に焼き込む (スキン付きは xf = 単位行列なので変化なし)。
+        const QVector3D p = xf.map(QVector3D(p0.x, p0.y, p0.z));
+        QVector3D       n = nxf.mapVector(QVector3D(n0.x, n0.y, n0.z));
+        if (n.lengthSquared() > 1e-12f) n.normalize();
+        // ボーンウェイトは合計 1 に正規化しておく (シェーダ側は正規化を仮定)。
+        std::array<float, 4> w = vwt[v];
+        const float          s = w[0] + w[1] + w[2] + w[3];
+        if (s > 0.0f) {
+          for (float& x : w) {
+            x /= s;
+          }
         }
+        // 1 頂点 = 位置3 + 法線3 + UV2 + boneID4 + weight4 = 16 float でインタリーブ。
+        verts.insert(verts.end(), {p.x(), p.y(), p.z(), n.x(), n.y(), n.z(), t.x, t.y, vid[v][0],
+                                   vid[v][1], vid[v][2], vid[v][3], w[0], w[1], w[2], w[3]});
+        lo = QVector3D(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
+        hi = QVector3D(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
       }
-      // 1 頂点 = 位置3 + 法線3 + UV2 + boneID4 + weight4 = 16 float でインタリーブ。
-      verts.insert(verts.end(), {p.x, p.y, p.z, n.x, n.y, n.z, t.x, t.y, vid[v][0], vid[v][1],
-                                 vid[v][2], vid[v][3], w[0], w[1], w[2], w[3]});
-      lo = QVector3D(std::min(lo.x(), p.x), std::min(lo.y(), p.y), std::min(lo.z(), p.z));
-      hi = QVector3D(std::max(hi.x(), p.x), std::max(hi.y(), p.y), std::max(hi.z(), p.z));
-    }
-    for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
-      const aiFace& face = mesh->mFaces[f];
-      if (face.mNumIndices != 3) continue;
-      indices.push_back(base + face.mIndices[0]);
-      indices.push_back(base + face.mIndices[1]);
-      indices.push_back(base + face.mIndices[2]);
-      ++triCount;
-    }
-    SubMesh sm;
-    sm.indexOffset = subStart;
-    sm.indexCount  = int(indices.size()) - subStart;
-    sm.material    = std::min<int>(mesh->mMaterialIndex, int(m_materials.size()) - 1);
-    if (sm.indexCount > 0) m_submeshes.push_back(sm);
-  }
+      for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
+        const aiFace& face = mesh->mFaces[f];
+        if (face.mNumIndices != 3) continue;
+        indices.push_back(base + face.mIndices[0]);
+        indices.push_back(base + face.mIndices[mirror ? 2 : 1]);
+        indices.push_back(base + face.mIndices[mirror ? 1 : 2]);
+        ++triCount;
+      }
+      SubMesh sm;
+      sm.indexOffset = subStart;
+      sm.indexCount  = int(indices.size()) - subStart;
+      sm.material    = std::min<int>(mesh->mMaterialIndex, int(m_materials.size()) - 1);
+      if (sm.indexCount > 0) m_submeshes.push_back(sm);
+    }  // for mr (ノードが参照するメッシュ)
+  }  // for ni (ノード)
 
   if (verts.empty() || indices.empty()) {
     if (error) *error = QStringLiteral("メッシュが見つかりませんでした");
@@ -631,6 +657,12 @@ void ModelView::setWireframe(bool on) {
   emit wireframeChanged(on);
   renderFrame();
 }
+void ModelView::setCullBackface(bool on) {
+  if (m_cullBackface == on) return;
+  m_cullBackface = on;
+  emit cullBackfaceChanged(on);
+  renderFrame();
+}
 void ModelView::resetView() {
   m_yaw   = 0.7f;
   m_pitch = 0.35f;
@@ -773,6 +805,15 @@ void ModelView::renderFrame() {
   m_fbo->bind();
   glViewport(0, 0, w, h);
   glEnable(GL_DEPTH_TEST);
+  // 裏面カリング。Unity など一般的なエンジンは既定で片面描画なので、それに合わせて
+  // 法線の裏側 (CW) を描かない。ワイヤーフレーム時は構造把握のため両面描く。
+  if (m_cullBackface && !m_wireframe) {
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+  } else {
+    glDisable(GL_CULL_FACE);
+  }
   glClearColor(0.12f, 0.13f, 0.15f, 1.0f);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -935,7 +976,8 @@ void ModelView::paintEvent(QPaintEvent*) {
          << QStringLiteral("R : 視点リセット")
          << QStringLiteral("T : テクスチャ")
          << QStringLiteral("G : グリッド")
-         << QStringLiteral("F : ワイヤーフレーム");
+         << QStringLiteral("F : ワイヤーフレーム")
+         << QStringLiteral("C : 裏面カリング");
     if (!m_boneOffset.empty()) rows << QStringLiteral("B : ボーン");
     if (m_hasAnim) rows << QStringLiteral("Space : 再生 / 停止");
     rows << QStringLiteral("H : 操作の表示")
@@ -1034,6 +1076,7 @@ bool ModelView::dispatchShortcut(const QString& cmd) {
   if (cmd == QLatin1String("viewer.model.toggle_texture"))   { setTextureEnabled(!m_texEnabled); return true; }
   if (cmd == QLatin1String("viewer.model.toggle_grid"))      { setShowGrid(!m_showGrid); return true; }
   if (cmd == QLatin1String("viewer.model.toggle_wireframe")) { setWireframe(!m_wireframe); return true; }
+  if (cmd == QLatin1String("viewer.model.toggle_backface"))  { setCullBackface(!m_cullBackface); return true; }
   if (cmd == QLatin1String("viewer.model.toggle_bones")) {
     if (!m_boneOffset.empty()) {
       setShowBones(!m_showBones);

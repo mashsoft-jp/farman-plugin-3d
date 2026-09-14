@@ -4,7 +4,8 @@
 //  - Assimp 読み込み / ディフューズテクスチャ (外部・埋め込み) / UV
 //  - スケルタルアニメーション (GPU スキニング, 4 ボーン加重)
 //  - 複数マテリアル・メッシュ (サブメッシュ単位)
-//  - グリッド + 座標軸 / ワイヤーフレーム / オービット・自動フィット
+//  - ノード階層の変換をメッシュに適用 (インスタンス配置・鏡像に対応)
+//  - グリッド + 座標軸 / ワイヤーフレーム / 裏面カリング / オービット・自動フィット
 //
 // 描画は「隠し QOpenGLContext + QOffscreenSurface + FBO にオフスクリーン描画し、
 // 得た QImage を paintEvent で表示する」方式。ネイティブ GL 面 (QOpenGLWidget)
@@ -75,10 +76,12 @@ public slots:
   void setShowHelp(bool on);
   void setShowBones(bool on);
   void setWireframe(bool on);
+  void setCullBackface(bool on);  // 裏面を描かない (Unity 等と同じ片面表示)
   void resetView();
 
   bool showHelp() const { return m_showHelp; }
   bool wireframe() const { return m_wireframe; }
+  bool cullBackface() const { return m_cullBackface; }
   bool hasSkeleton() const { return !m_boneOffset.empty(); }
 
 signals:
@@ -87,6 +90,7 @@ signals:
   void showHelpChanged(bool on);
   void showBonesChanged(bool on);
   void wireframeChanged(bool on);
+  void cullBackfaceChanged(bool on);
   void animationPlayingChanged(bool on);
   void infoRequested();  // i キー / ツールバーの情報ボタン相当
 
@@ -130,6 +134,7 @@ private:
   bool                      m_showHelp   = true;
   bool                      m_showBones  = false;
   bool                      m_wireframe  = false;
+  bool                      m_cullBackface = true;
   QVector3D                 m_bboxMin{0, 0, 0};
   QVector3D                 m_bboxMax{0, 0, 0};
   QString                   m_summary;
