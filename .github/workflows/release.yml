@@ -229,7 +229,7 @@ jobs:
           /usr/bin/ditto -c -k "$dylib" "$RUNNER_TEMP/notarize.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$NOTARY_PW" --wait
-          echo "signed + notarized: $(codesign -dv "$dylib" 2>&1 | grep -i authority | head -1)"
+          echo "signed + notarized: $(codesign -dvv "$dylib" 2>&1 | grep -i authority | head -1)"
 
       - name: Collect artifact (Windows)
         if: runner.os == 'Windows'

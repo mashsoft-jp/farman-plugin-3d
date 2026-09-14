@@ -221,7 +221,7 @@ jobs:
           codesign --force --options runtime --timestamp \
             --sign "$IDENTITY_HASH" "$dylib"
           codesign --verify --strict "$dylib"
-          echo "signed: $(codesign -dv "$dylib" 2>&1 | grep -i authority | head -1)"
+          echo "signed: $(codesign -dvv "$dylib" 2>&1 | grep -i authority | head -1)"
 
       - name: Collect artifact (Windows)
         if: runner.os == 'Windows'
