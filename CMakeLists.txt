@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(farman-plugin-3d VERSION 0.2.0 LANGUAGES CXX)
+project(farman-plugin-3d VERSION 0.3.0 LANGUAGES CXX)
 
 # farman 本体とは独立してビルドする、farman 用の外部ビュアープラグイン。
 # 成果物 ModelViewerPlugin.(dylib|so|dll) を farman の外部プラグインディレクトリ
