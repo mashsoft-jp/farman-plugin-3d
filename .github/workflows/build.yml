@@ -1,7 +1,14 @@
 # GitHub Actions: push / PR / 手動起動で 3 OS 分の 3D ビュアープラグインを
 # ビルドし、成果物 (ModelViewerPlugin.{dylib,so,dll}) を Artifacts に上げる。
-# Windows / Linux での動作確認を回すための CI (署名・Release はしない)。
-# 正式配布は release.yml (v* タグ) が担当する。
+# 動作確認用の CI (Release はしない)。正式配布は release.yml (v* タグ) が担当する。
+#
+#   ★macOS の成果物は Developer ID で「署名のみ」する (公証はしない)。
+#     farman.app は Hardened Runtime 付きで署名されておりライブラリ検証が働く
+#     ため、同じ Team ID で署名された dylib しかロードできない (ad-hoc 署名だと
+#     "library load disallowed by system policy" で弾かれる)。署名だけあれば
+#     手元の farman で動作確認できる。公証が無いので、ブラウザ経由でダウンロード
+#     して quarantine が付いた場合は xattr -d com.apple.quarantine が必要
+#     (gh run download 経由なら quarantine は付かない)。
 #
 #   ★ABI 一致が必須: プラグインは farman 本体と同じ Qt でビルドしないと、
 #     farman プロセスにロードされたとき qobject_cast や動的リンク解決に失敗する。
@@ -173,6 +180,48 @@ jobs:
             echo "=== otool -L (rewritten) ==="
             otool -L "$dylib" || true
           fi
+
+      # Developer ID 署名 (macOS、公証なし)。install_name 書き換えで署名が無効化
+      # されるため、書き換えの「後」に署名する。release.yml の署名手順と同じだが
+      # notarytool への提出は省く (push ごとに公証を回さない)。MACOS_CERTIFICATE_*
+      # secrets が無い場合 (fork からの PR 等) は ad-hoc のまま warning を出して続行。
+      - name: Sign with Developer ID (macOS, no notarization)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT_BASE64:   ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          dylib="out/ModelViewerPlugin.dylib"
+          if [ -z "$CERT_BASE64" ]; then
+            echo "::warning::Developer ID signing NOT available (MACOS_CERTIFICATE_* secrets 未設定)。"
+            echo "ad-hoc 署名のままです。Hardened Runtime の farman.app にはロードできません。"
+            exit 0
+          fi
+
+          # 一時 Keychain に .p12 を import (release.yml と同手順)。
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "$CERT_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain  -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S "apple-tool:,apple:,codesign:" \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          IDENTITY_HASH=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -n 1 | awk '{print $2}')
+          if [ -z "$IDENTITY_HASH" ]; then
+            echo "::error::Developer ID Application identity not found after import"; exit 1
+          fi
+
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY_HASH" "$dylib"
+          codesign --verify --strict "$dylib"
+          echo "signed: $(codesign -dv "$dylib" 2>&1 | grep -i authority | head -1)"
 
       - name: Collect artifact (Windows)
         if: runner.os == 'Windows'

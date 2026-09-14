@@ -30,7 +30,11 @@ OpenGLWidgets は不要。
 `.github/workflows/` で 3 OS 分を自動ビルドする:
 
 - **build.yml** — push / PR / 手動起動で macOS(arm64)・Linux(x86_64)・Windows(x64)
-  をビルドし、成果物を Artifacts に上げる (Windows/Linux 動作確認用)。
+  をビルドし、成果物を Artifacts に上げる (動作確認用)。macOS は Developer ID で
+  **署名のみ** (公証なし)。farman.app は Hardened Runtime でライブラリ検証が
+  働くため、同じ Team ID の署名が無い dylib はロードできない。ブラウザ経由で
+  ダウンロードして quarantine が付いた場合は `xattr -d com.apple.quarantine`
+  が必要 (`gh run download` なら不要)。
 - **release.yml** — `v*` タグ push で同じくビルドし、macOS は署名+公証して
   GitHub Releases に **draft** 添付 (確認後に手動 Publish)。
 
