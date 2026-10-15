@@ -306,7 +306,7 @@ bool ModelView::loadModel(const QString& path, QString* error) {
 
   m_boneOffset.clear();
   m_boneNode.clear();
-  std::unordered_map<std::string, int> boneId;
+  std::unordered_map<std::string, std::vector<int>> boneId;
 
   // メッシュは aiScene::mMeshes を直接並べるのではなく、ノード階層をたどって
   // 「各ノードが参照するメッシュ」を、そのノードのグローバル変換を頂点に焼き込んで
@@ -316,13 +316,17 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   // ボーン行列 (offset 行列にメッシュノードの変換を含む) が配置を担うので変換しない。
   // 鏡像変換 (行列式 < 0) は面の向きが反転するので、インデックス順を入れ替えて
   // 表裏 (CCW) を保つ。
+  const bool willSkin = animated && scene->mAnimations[0]->mDuration > 0.0;
   for (size_t ni = 0; ni < nodePtr.size(); ++ni) {
     const aiNode* node = nodePtr[ni];
     for (unsigned int mr = 0; mr < node->mNumMeshes; ++mr) {
       const unsigned int mi = node->mMeshes[mr];
       if (mi >= scene->mNumMeshes) continue;
       const aiMesh*    mesh    = scene->mMeshes[mi];
-      const bool       skinned = mesh->mNumBones > 0;
+      // GPU スキニングを行うのはアニメ付きのときだけ ([m_hasAnim])。アニメ無しの
+      // スキン付きメッシュは頂点がそのまま描画されるので、静的メッシュと同様に
+      // ノード変換を焼き込む (顔だけ頭ローカル座標で、原点に落ちるのを防ぐ)。
+      const bool       skinned = mesh->mNumBones > 0 && willSkin;
       const QMatrix4x4 xf      = skinned ? QMatrix4x4() : nodeGlobal[ni];
       const QMatrix4x4 nxf     = xf.inverted().transposed();  // 法線用 (逆転置)
       const bool       mirror  = !skinned && xf.determinant() < 0.0;
@@ -337,16 +341,30 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
         const aiBone*     bone = mesh->mBones[b];
         const std::string name = bone->mName.C_Str();
-        int               id;
-        auto              it = boneId.find(name);
-        if (it == boneId.end()) {
-          id           = int(m_boneOffset.size());
-          boneId[name] = id;
-          m_boneOffset.push_back(toQM(bone->mOffsetMatrix));
-            auto found = nodeIndex.find(name);
+        // 同名ボーンでも逆バインド行列 (offset) はメッシュごとに異なることがある
+        // (FBX のクラスタごとにメッシュ変換が違う場合)。名前だけで共有すると最初の
+        // メッシュの行列が他のメッシュにも使われて位置がずれるので、名前 + 行列の
+        // 組でエントリを分ける。
+        const QMatrix4x4 offset = toQM(bone->mOffsetMatrix);
+        int              id     = -1;
+        auto&            ids    = boneId[name];
+        for (int cand : ids) {
+          const QMatrix4x4& o = m_boneOffset[cand];
+          bool              same = true;
+          for (int k = 0; k < 16 && same; ++k) {
+            same = std::abs(o.constData()[k] - offset.constData()[k]) <= 1e-4f;
+          }
+          if (same) {
+            id = cand;
+            break;
+          }
+        }
+        if (id < 0) {
+          id = int(m_boneOffset.size());
+          ids.push_back(id);
+          m_boneOffset.push_back(offset);
+          auto found = nodeIndex.find(name);
           m_boneNode.push_back(found == nodeIndex.end() ? -1 : found->second);
-        } else {
-          id = it->second;
         }
         for (unsigned int w = 0; w < bone->mNumWeights; ++w) {
           const unsigned int v  = bone->mWeights[w].mVertexId;
@@ -520,7 +538,7 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   if (m_hasAnim)
     m_summary += QStringLiteral(" · アニメ %1s / ボーン %2")
                      .arg(animationDuration(), 0, 'f', 1)
-                     .arg(m_boneOffset.size());
+                     .arg(boneId.size());
 
   m_filePath = path;
   buildInfoText();
