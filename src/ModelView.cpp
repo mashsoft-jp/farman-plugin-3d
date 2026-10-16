@@ -7,6 +7,7 @@
 #include <QFontMetrics>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QMap>
 #include <QMouseEvent>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
@@ -24,11 +25,13 @@
 
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <unordered_map>
 
@@ -47,8 +50,11 @@ uniform mat4 uMVP;
 uniform mat3 uNormalView;
 uniform mat4 uBones[MAX_BONES];
 uniform bool uSkinned;
+uniform float uHiBone[MAX_BONES];  // 強調するボーン (1) かどうか
+uniform bool uHiBoneOn;
 out vec3 vNormalView;
 out vec2 vUV;
+out float vHi;                     // 強調ボーンのウェイト (0〜1)
 void main() {
   vec4 pos = vec4(aPos, 1.0);
   vec3 nrm = aNormal;
@@ -63,6 +69,11 @@ void main() {
   }
   vNormalView = uNormalView * nrm;
   vUV = aUV;
+  vHi = 0.0;
+  if (uHiBoneOn) {
+    vHi = clamp(aWeights.x * uHiBone[int(aBoneIDs.x)] + aWeights.y * uHiBone[int(aBoneIDs.y)] +
+                aWeights.z * uHiBone[int(aBoneIDs.z)] + aWeights.w * uHiBone[int(aBoneIDs.w)], 0.0, 1.0);
+  }
   gl_Position = uMVP * pos;
 }
 )";
@@ -70,20 +81,25 @@ void main() {
 const char* kFragmentShader = R"(#version 330 core
 in vec3 vNormalView;
 in vec2 vUV;
+in float vHi;
 uniform sampler2D uTex;
 uniform bool uUseTexture;
 uniform bool uUnlit;      // シェーディングを無くす (ワイヤーフレーム用)
 uniform vec3 uBaseColor;
+uniform float uTint;      // 選択中のメッシュ: オレンジへの混ぜ具合 (0 / 1)
+uniform float uDim;       // 選択外のメッシュの明るさ (1 = そのまま)
 out vec4 fragColor;
+const vec3 kHi = vec3(1.0, 0.55, 0.10);
 void main() {
   vec3  base = uUseTexture ? texture(uTex, vec2(vUV.x, 1.0 - vUV.y)).rgb : uBaseColor;
-  if (uUnlit) { fragColor = vec4(base, 1.0); return; }
+  float t    = clamp(uTint * 0.65 + vHi * 0.75, 0.0, 0.85);
+  if (uUnlit) { fragColor = vec4(mix(base * uDim, kHi, t), 1.0); return; }
   vec3 N = normalize(vNormalView);
   if (N.z < 0.0) N = -N;
   float head = max(N.z, 0.0);
   float fill = max(dot(N, normalize(vec3(0.3, 0.6, 0.5))), 0.0) * 0.35;
   float lit  = 0.28 + 0.72 * head + fill;
-  fragColor  = vec4(base * lit, 1.0);
+  fragColor  = vec4(mix(base * lit * uDim, kHi * (0.55 + 0.45 * lit), t), 1.0);
 }
 )";
 
@@ -104,6 +120,75 @@ void main() { fragColor = vec4(vColor, 1.0); }
 QMatrix4x4 toQM(const aiMatrix4x4& m) {
   return QMatrix4x4(m.a1, m.a2, m.a3, m.a4, m.b1, m.b2, m.b3, m.b4, m.c1, m.c2, m.c3, m.c4,
                     m.d1, m.d2, m.d3, m.d4);
+}
+
+// 行列から回転・平行移動だけを残す (基底ベクトルを正規化してスケールを除く)。
+QMatrix4x4 stripScale(const QMatrix4x4& m) {
+  QMatrix4x4 r = m;
+  for (int c = 0; c < 3; ++c) {
+    QVector3D axis(m(0, c), m(1, c), m(2, c));
+    const float len = axis.length();
+    if (len > 1e-12f) axis /= len;
+    r(0, c) = axis.x();
+    r(1, c) = axis.y();
+    r(2, c) = axis.z();
+  }
+  return r;
+}
+
+// ノードの整数メタデータ (FBX の InheritType など) を読む。無ければ fallback。
+int nodeIntMeta(const aiNode* n, const char* key, int fallback) {
+  if (!n->mMetaData) return fallback;
+  for (unsigned int i = 0; i < n->mMetaData->mNumProperties; ++i) {
+    if (n->mMetaData->mKeys[i] != aiString(key)) continue;
+    const aiMetadataEntry& e = n->mMetaData->mValues[i];
+    switch (e.mType) {
+      case AI_INT32:  return *static_cast<int32_t*>(e.mData);
+      case AI_UINT32: return int(*static_cast<uint32_t*>(e.mData));
+      case AI_INT64:  return int(*static_cast<int64_t*>(e.mData));
+      case AI_UINT64: return int(*static_cast<uint64_t*>(e.mData));
+      default:        return fallback;
+    }
+  }
+  return fallback;
+}
+
+bool isFbxPseudoNode(const aiNode* n) {
+  return std::strstr(n->mName.C_Str(), "$AssimpFbx$") != nullptr;
+}
+
+// 親のグローバル変換と子のローカル変換からグローバル変換を作る。noParentScale の
+// ノードは親のスケールを引き継がない (FBX InheritType=Rrs)。
+// 線形部 (3x3) だけを残し、基底ベクトルを正規化する (回転成分だけを取り出す)。
+QMatrix4x4 normalizedLinear(const QMatrix4x4& m) {
+  QMatrix4x4 r;
+  for (int c = 0; c < 3; ++c) {
+    QVector3D axis(m(0, c), m(1, c), m(2, c));
+    const float len = axis.length();
+    if (len > 1e-12f) axis /= len;
+    r(0, c) = axis.x();
+    r(1, c) = axis.y();
+    r(2, c) = axis.z();
+  }
+  return r;
+}
+
+float columnLength(const QMatrix4x4& m, int c) {
+  return QVector3D(m(0, c), m(1, c), m(2, c)).length();
+}
+
+// 親のスケールは子の「配置」(平行移動) にだけ効き、子の向き・形 (線形部) には
+// 効かない。
+QMatrix4x4 composeGlobal(const QMatrix4x4& parent, const QMatrix4x4& local, bool noParentScale) {
+  QMatrix4x4 g = parent * local;
+  if (!noParentScale) return g;
+  const QMatrix4x4 lin = stripScale(parent) * local;  // 線形部 = 親の回転 * 子のローカル
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      g(r, c) = lin(r, c);
+    }
+  }
+  return g;
 }
 
 // 外部テクスチャの実ファイルを探す。FBX には Windows 絶対パスが記録されている
@@ -241,14 +326,117 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       const QMatrix4x4 local = toQM(it.n->mTransformation);
       m_nodes.push_back({QString::fromUtf8(it.n->mName.C_Str()), local, it.parent});
       nodePtr.push_back(it.n);
-      // 前順走査なので親のグローバル変換は計算済み。
-      nodeGlobal.push_back(it.parent < 0 ? local : nodeGlobal[it.parent] * local);
+      nodeGlobal.push_back(local);  // 仮置き。継承ルールを反映して下で作り直す
       nodeIndex[it.n->mName.C_Str()] = idx;
       for (int c = int(it.n->mNumChildren) - 1; c >= 0; --c)
         stack.push_back({it.n->mChildren[c], idx});
     }
   }
+  // FBX の InheritType=Rrs (値 2) の関節は、親のスケールを自分の向き・形に継承しない
+  // ([composeGlobal])。Maya 出力の関節は個々に Lcl Scaling=0.01 を持つことがあり、
+  // 素直に親子で掛けると階層が深いほどスケールが累積して潰れる (手・剣が 1 点に潰れて
+  // 見えなくなる)。assimp は
+  // 関節の前に $AssimpFbx$ の補助ノード (Translation/PreRotation/Scaling) を挟み、
+  // InheritType は実ノードのメタデータにしか載らない。補助ノードは先頭の子 (= 連鎖の
+  // 先) のフラグを引き継ぎ、実ノードを親に持つ連鎖の先頭だけが「親のスケールを除く」。
+  {
+    std::vector<char> rrs(m_nodes.size(), 0);
+    for (size_t i = m_nodes.size(); i-- > 0;) {
+      const aiNode* n = nodePtr[i];
+      if (isFbxPseudoNode(n)) {
+        rrs[i] = n->mNumChildren > 0 ? rrs[nodeIndex[n->mChildren[0]->mName.C_Str()]] : 0;
+      } else {
+        rrs[i] = nodeIntMeta(n, "InheritType", 1) == 2;
+      }
+    }
+    for (size_t i = 0; i < m_nodes.size(); ++i) {
+      const int p = m_nodes[i].parent;
+      m_nodes[i].noParentScale = rrs[i] && p >= 0 && !isFbxPseudoNode(nodePtr[p]);
+    }
+  }
   m_globalInverse = toQM(scene->mRootNode->mTransformation).inverted();
+
+  std::vector<QMatrix4x4> plainGlobal;  // ボーンを介さない素直な階層合成 (メッシュ変換の算出に使う)
+
+  // ── ボーンのバインド配置 ──
+  // スキンの offset 行列は「メッシュ空間→ボーン空間」の逆バインドで、メッシュ自身の
+  // ワールド変換を含む (offset = inverse(ボーンのバインド配置) * メッシュ変換)。
+  // よって メッシュ変換 * inverse(offset) がボーンのバインド時のワールド配置になり、
+  // どのメッシュから求めても一致する。この値を土台に、位置・スケールはバインドポーズ、
+  // 回転はノードの現在姿勢、という姿勢を作る ([poseGlobals])。FBX のノード階層から
+  // スケールや平行移動まで再現しようとすると、InheritType や単位換算で破綻する。
+  {
+    std::vector<QMatrix4x4>& plain = plainGlobal;
+    plain.assign(m_nodes.size(), QMatrix4x4());
+    for (size_t i = 0; i < m_nodes.size(); ++i) {
+      const int p = m_nodes[i].parent;
+      plain[i]    = p < 0 ? m_nodes[i].bind
+                          : composeGlobal(plain[p], m_nodes[i].bind, m_nodes[i].noParentScale);
+    }
+    for (size_t i = 0; i < nodePtr.size(); ++i) {
+      for (unsigned int mr = 0; mr < nodePtr[i]->mNumMeshes; ++mr) {
+        const unsigned int mi = nodePtr[i]->mMeshes[mr];
+        if (mi >= scene->mNumMeshes) continue;
+        const aiMesh* mesh = scene->mMeshes[mi];
+        for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
+          auto it = nodeIndex.find(mesh->mBones[b]->mName.C_Str());
+          if (it == nodeIndex.end() || m_nodes[it->second].isBone) continue;
+          m_nodes[it->second].isBone     = true;
+          m_nodes[it->second].bindGlobal = plain[i] * toQM(mesh->mBones[b]->mOffsetMatrix).inverted();
+        }
+      }
+    }
+    // ボーンの平均スケールで正規化する (スケール 1 なら何もしない)。
+    {
+      double sum = 0.0;
+      int    cnt = 0;
+      for (const Node& nd : m_nodes) {
+        if (!nd.isBone) continue;
+        sum += columnLength(nd.bindGlobal, 0);
+        ++cnt;
+      }
+      const float s0 = cnt > 0 ? float(sum / cnt) : 1.0f;
+      m_boneS0       = s0;
+      m_boneNorm.setToIdentity();
+      if (s0 > 1e-12f && std::abs(s0 - 1.0f) > 1e-3f) {
+        m_boneNorm.scale(1.0f / s0);
+        for (Node& nd : m_nodes) {
+          if (nd.isBone) nd.bindGlobal = m_boneNorm * nd.bindGlobal;
+        }
+      }
+    }
+    {
+      // スキン付きメッシュのノードのスケールの中央値 (平均は、桁違いのスケールを持つ
+      // ノードが混ざると引きずられる)。
+      std::vector<float> scales;
+      for (size_t i = 0; i < nodePtr.size(); ++i) {
+        for (unsigned int mr = 0; mr < nodePtr[i]->mNumMeshes; ++mr) {
+          const unsigned int mi = nodePtr[i]->mMeshes[mr];
+          if (mi >= scene->mNumMeshes || scene->mMeshes[mi]->mNumBones == 0) continue;
+          scales.push_back(columnLength(plain[i], 0));
+        }
+      }
+      std::sort(scales.begin(), scales.end());
+      const float sRef = scales.empty() ? 1.0f : scales[scales.size() / 2];
+      m_meshNorm.setToIdentity();
+      if (sRef > 1e-12f && std::abs(sRef - 1.0f) > 1e-3f) m_meshNorm.scale(1.0f / sRef);
+    }
+    for (size_t i = 0; i < m_nodes.size(); ++i) {
+      const int p = m_nodes[i].parent;
+      m_nodes[i].boneParent = p < 0 ? -1 : (m_nodes[p].isBone ? p : m_nodes[p].boneParent);
+      if (m_nodes[i].isBone) {
+        const int bp       = m_nodes[i].boneParent;
+        m_nodes[i].restRel = bp >= 0 ? m_nodes[bp].bindGlobal.inverted() * m_nodes[i].bindGlobal
+                                     : m_nodes[i].bindGlobal;
+      }
+    }
+    // メッシュに焼き込むノードのグローバル変換は、バインド姿勢 (ノードの現在姿勢) で作る。
+    std::vector<QMatrix4x4> locals(m_nodes.size());
+    for (size_t i = 0; i < m_nodes.size(); ++i) {
+      locals[i] = m_nodes[i].bind;
+    }
+    nodeGlobal = poseGlobals(locals);
+  }
 
   // ── マテリアル ──
   m_materials.clear();
@@ -293,10 +481,21 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   }
   if (m_materials.empty()) m_materials.resize(1);
 
+  // アニメ無しで、ボーンを持つ (= 姿勢を現在のノード姿勢で作る) モデルか。
+  bool anySkinnedMesh = false;
+  for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
+    anySkinnedMesh = anySkinnedMesh || scene->mMeshes[mi]->mNumBones > 0;
+  }
+  const bool willAnimate = animated && scene->mAnimations[0]->mDuration > 0.0 && anySkinnedMesh;
+  m_staticSkin           = anySkinnedMesh && !willAnimate;
+
   // ── ジオメトリ + サブメッシュ + スキンウェイト ──
   std::vector<float>        verts;
   std::vector<unsigned int> indices;
   m_submeshes.clear();
+  m_hiJoint = -1;
+  m_hiActive = m_hiBoneOn = false;
+  m_hiSub.clear();
   QVector3D lo(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
               std::numeric_limits<float>::max());
   QVector3D hi(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(),
@@ -316,24 +515,39 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   // ボーン行列 (offset 行列にメッシュノードの変換を含む) が配置を担うので変換しない。
   // 鏡像変換 (行列式 < 0) は面の向きが反転するので、インデックス順を入れ替えて
   // 表裏 (CCW) を保つ。
-  const bool willSkin = animated && scene->mAnimations[0]->mDuration > 0.0;
   for (size_t ni = 0; ni < nodePtr.size(); ++ni) {
     const aiNode* node = nodePtr[ni];
     for (unsigned int mr = 0; mr < node->mNumMeshes; ++mr) {
       const unsigned int mi = node->mMeshes[mr];
       if (mi >= scene->mNumMeshes) continue;
       const aiMesh*    mesh    = scene->mMeshes[mi];
-      // GPU スキニングを行うのはアニメ付きのときだけ ([m_hasAnim])。アニメ無しの
-      // スキン付きメッシュは頂点がそのまま描画されるので、静的メッシュと同様に
-      // ノード変換を焼き込む (顔だけ頭ローカル座標で、原点に落ちるのを防ぐ)。
-      const bool       skinned = mesh->mNumBones > 0 && willSkin;
-      const QMatrix4x4 xf      = skinned ? QMatrix4x4() : nodeGlobal[ni];
+      // スキン付きメッシュはボーン行列 (offset にメッシュの変換を含む) が配置を担う。
+      // アニメの有無に関わらず、ノードの現在姿勢でスキニングして描画する。
+      const bool       skinned = mesh->mNumBones > 0;
+      m_nodes[ni].meshInfo << QString::fromUtf8(mesh->mName.C_Str()) +
+                                  (skinned ? QStringLiteral(" (スキン)") : QString());
+      // ボーンを祖先に持たない静的メッシュは、スキン付きメッシュと同じ寸法にそろえる。
+      const bool       underBone = m_nodes[ni].isBone || m_nodes[ni].boneParent >= 0;
+      QMatrix4x4 xf;
+      if (skinned && m_staticSkin) {
+        // 静止描画のスキン付きメッシュ: メッシュ変換を縮尺をそろえて頂点に焼き込む。
+        // ボーン行列 = 現在配置 * inverse(バインド配置) にはメッシュ変換が含まれない。
+        const float sMesh = columnLength(plainGlobal[ni], 0);
+        QMatrix4x4  q;
+        if (sMesh > 1e-12f) q.scale(1.0f / sMesh);
+        xf = q * plainGlobal[ni];
+      } else if (skinned) {
+        xf = QMatrix4x4();  // アニメ付き: offset 行列がメッシュの配置を担う
+      } else {
+        xf = underBone ? nodeGlobal[ni] : m_meshNorm * nodeGlobal[ni];
+      }
       const QMatrix4x4 nxf     = xf.inverted().transposed();  // 法線用 (逆転置)
-      const bool       mirror  = !skinned && xf.determinant() < 0.0;
+      const bool       mirror  = !(skinned && !m_staticSkin) && xf.determinant() < 0.0;
       const bool    meshUV = mesh->HasTextureCoords(0);
       anyUV                = anyUV || meshUV;
       const unsigned int base = static_cast<unsigned int>(verts.size() / ModelView::kFloatsPerVertex);
       const int          subStart = int(indices.size());
+      const unsigned int triBefore = triCount;
 
       std::vector<std::array<float, 4>> vid(mesh->mNumVertices, {0, 0, 0, 0});
       std::vector<std::array<float, 4>> vwt(mesh->mNumVertices, {0, 0, 0, 0});
@@ -341,6 +555,13 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
         const aiBone*     bone = mesh->mBones[b];
         const std::string name = bone->mName.C_Str();
+        {
+          auto bn = nodeIndex.find(name);
+          if (bn != nodeIndex.end()) {
+            m_nodes[bn->second].boneWeights += int(bone->mNumWeights);
+            ++m_nodes[bn->second].boneMeshes;
+          }
+        }
         // 同名ボーンでも逆バインド行列 (offset) はメッシュごとに異なることがある
         // (FBX のクラスタごとにメッシュ変換が違う場合)。名前だけで共有すると最初の
         // メッシュの行列が他のメッシュにも使われて位置がずれるので、名前 + 行列の
@@ -348,7 +569,16 @@ bool ModelView::loadModel(const QString& path, QString* error) {
         const QMatrix4x4 offset = toQM(bone->mOffsetMatrix);
         int              id     = -1;
         auto&            ids    = boneId[name];
+        // アニメ無しの静止描画はボーン名ごとに 1 つ (メッシュ差は頂点に焼き込み済み)。
+        // アニメ付きは (名前, 行列) ごと。ただしシェーダの上限 (128) を超える分は、
+        // 同名の先頭エントリを使い回す。
+        if (m_staticSkin && !ids.empty()) {
+          id = ids[0];
+        } else if (!m_staticSkin && ids.size() > 0 && m_boneOffset.size() >= 128) {
+          id = ids[0];
+        }
         for (int cand : ids) {
+          if (id >= 0) break;
           const QMatrix4x4& o = m_boneOffset[cand];
           bool              same = true;
           for (int k = 0; k < 16 && same; ++k) {
@@ -407,10 +637,23 @@ bool ModelView::loadModel(const QString& path, QString* error) {
         indices.push_back(base + face.mIndices[mirror ? 1 : 2]);
         ++triCount;
       }
+      {
+        MeshDetail md;
+        md.name      = QString::fromUtf8(mesh->mName.C_Str());
+        md.vertices  = int(mesh->mNumVertices);
+        md.triangles = int(triCount - triBefore);
+        md.bones     = int(mesh->mNumBones);
+        md.skinned   = skinned;
+        if (mesh->mMaterialIndex < scene->mNumMaterials) {
+          md.material = QString::fromUtf8(scene->mMaterials[mesh->mMaterialIndex]->GetName().C_Str());
+        }
+        m_nodes[ni].meshes.push_back(md);
+      }
       SubMesh sm;
       sm.indexOffset = subStart;
       sm.indexCount  = int(indices.size()) - subStart;
       sm.material    = std::min<int>(mesh->mMaterialIndex, int(m_materials.size()) - 1);
+      sm.node        = int(ni);
       if (sm.indexCount > 0) m_submeshes.push_back(sm);
     }  // for mr (ノードが参照するメッシュ)
   }  // for ni (ノード)
@@ -478,7 +721,7 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   // ことがある (バインドポーズと初期ポーズが違う)。そこでバインドポーズのボーン行列で
   // CPU 側スキニングした頂点位置から AABB を取り直し、自動フィット (中心・半径) が
   // 破綻しないようにする。頂点フォーマットは 16 float/頂点 (末尾に boneID4 + weight4)。
-  if (m_hasAnim) {
+  if (!m_boneOffset.empty()) {
     computeBoneMatrices(0.0, /*bindPose=*/true);
     lo = QVector3D(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
                    std::numeric_limits<float>::max());
@@ -516,7 +759,6 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   }
 
   // アニメ無しでもボーンがあれば、バインドポーズの関節位置を用意しておく。
-  if (!m_boneOffset.empty() && !m_hasAnim) computeBoneMatrices(0.0, /*bindPose=*/true);
 
   m_center   = (lo + hi) * 0.5f;
   m_radius   = std::max((hi - lo).length() * 0.5f, 1e-4f);
@@ -548,6 +790,41 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   return true;
 }
 
+// 各ノードのグローバル変換を求める (locals = ノードごとのローカル変換)。
+// ボーンは、静止時の配置 ([Node::restRel]: 位置・スケール) を土台に、ノードの
+// 回転だけを現在姿勢に差し替える。FBX のノード階層からスケールや平行移動まで再現
+// しようとすると、InheritType やセンチ/メートルの単位換算で破綻するため、バインド
+// ポーズが確実に持つ値を使う。ボーン以外のノードは通常どおり親と合成する。
+std::vector<QMatrix4x4> ModelView::poseGlobals(const std::vector<QMatrix4x4>& locals) const {
+  const size_t            n = m_nodes.size();
+  std::vector<QMatrix4x4> global(n);
+  std::vector<QMatrix4x4> acc(n);  // 最も近い祖先ボーンからの累積回転
+  for (size_t i = 0; i < n; ++i) {
+    const Node& nd   = m_nodes[i];
+    const int   p    = nd.parent;
+    QMatrix4x4  base;
+    if (p >= 0 && !m_nodes[p].isBone) base = acc[p];
+    acc[i] = normalizedLinear(base * locals[i]);
+    if (nd.isBone) {
+      // 回転はノードの現在姿勢、位置とスケールはバインド時の値。
+      QMatrix4x4 m = acc[i];
+      for (int c = 0; c < 3; ++c) {
+        const float s = columnLength(nd.restRel, c);
+        for (int r = 0; r < 3; ++r) {
+          m(r, c) *= s;
+        }
+      }
+      for (int r = 0; r < 3; ++r) {
+        m(r, 3) = nd.restRel(r, 3);
+      }
+      global[i] = nd.boneParent >= 0 ? global[nd.boneParent] * m : m;
+    } else {
+      global[i] = p < 0 ? locals[i] : composeGlobal(global[p], locals[i], nd.noParentScale);
+    }
+  }
+  return global;
+}
+
 // 指定時刻のスケルトン姿勢を計算する。
 //  1. 各ノードのローカル変換を求める (bindPose ならバインド姿勢そのまま、
 //     アニメ時はキーフレームを補間した T*R*S)。
@@ -559,7 +836,15 @@ bool ModelView::loadModel(const QString& path, QString* error) {
 void ModelView::computeBoneMatrices(double timeTicks, bool bindPose) {
   const size_t            n = m_nodes.size();
   std::vector<QMatrix4x4> global(n);
-  for (size_t i = 0; i < n; ++i) {
+  if (bindPose && m_staticSkin) {
+    // 静止 (アニメ無し) は、バインドポーズ基準の [poseGlobals]。
+    std::vector<QMatrix4x4> locals(n);
+    for (size_t i = 0; i < n; ++i) {
+      locals[i] = m_nodes[i].bind;
+    }
+    global = poseGlobals(locals);
+  }
+  for (size_t i = 0; i < n && !(bindPose && m_staticSkin); ++i) {
     QMatrix4x4 local = m_nodes[i].bind;
     if (!bindPose && i < m_channels.size() && m_channels[i].used) {
       // 位置・スケールは線形補間、回転は球面線形補間 (slerp) する。
@@ -589,7 +874,9 @@ void ModelView::computeBoneMatrices(double timeTicks, bool bindPose) {
       local.scale(s);
     }
     // 親 (m_nodes[i].parent) は前順走査で計算済みなので、そのまま合成できる。
-    global[i] = (m_nodes[i].parent < 0) ? local : global[m_nodes[i].parent] * local;
+    global[i] = (m_nodes[i].parent < 0)
+                    ? local
+                    : composeGlobal(global[m_nodes[i].parent], local, m_nodes[i].noParentScale);
   }
   // スケルトン描画用にノードのワールド座標を保存 (行列の平行移動成分 = 原点の位置)。
   m_jointWorld.resize(n);
@@ -601,7 +888,14 @@ void ModelView::computeBoneMatrices(double timeTicks, bool bindPose) {
   for (size_t b = 0; b < m_boneOffset.size(); ++b) {
     const int        node = m_boneNode[b];
     const QMatrix4x4 g    = (node >= 0) ? global[node] : QMatrix4x4();
-    m_boneMatrices[b]     = m_globalInverse * g * m_boneOffset[b];
+    if (m_staticSkin) {
+      // 現在配置 * inverse(バインド配置)。メッシュ変換は頂点に焼き込み済み。
+      const QMatrix4x4 invBind = (node >= 0 && m_nodes[node].isBone) ? m_nodes[node].bindGlobal.inverted()
+                                                                      : m_boneOffset[b];
+      m_boneMatrices[b] = m_globalInverse * g * invBind;
+    } else {
+      m_boneMatrices[b] = m_globalInverse * g * m_boneOffset[b];
+    }
   }
 }
 
@@ -643,6 +937,160 @@ void ModelView::buildInfoText() {
     m_infoLines << QStringLiteral("テクスチャ: なし");
   }
   if (!m_hasUV && hasTexture()) m_infoLines << QStringLiteral("※メッシュに UV なし");
+
+  m_infoHeader = m_infoLines;
+  m_infoTree.clear();
+
+  // FBX 内部のノード階層。assimp が関節の前に挟む補助ノード ($AssimpFbx$) は隠す。
+  // m_nodes は前順 (親が先) なので、表示深さは親の深さから求められる。
+  const auto isPseudo = [](const QString& name) {
+    return name.contains(QLatin1String("$AssimpFbx$"));
+  };
+  int shown = 0, bones = 0;
+  for (const Node& nd : m_nodes) {
+    if (isPseudo(nd.name)) continue;
+    ++shown;
+    if (nd.isBone) ++bones;
+  }
+  m_infoLines << QString();
+  m_infoLines << QStringLiteral("ノード階層 (%1 ノード · ボーン %2)").arg(shown).arg(bones);
+  std::vector<int> depth(m_nodes.size(), 0);
+  for (size_t i = 0; i < m_nodes.size(); ++i) {
+    const int p      = m_nodes[i].parent;
+    const int pDepth = p < 0 ? -1 : depth[p];
+    if (isPseudo(m_nodes[i].name)) {
+      depth[i] = pDepth;  // 補助ノードは深さを増やさない
+      continue;
+    }
+    depth[i] = pDepth + 1;
+    QString line = QString(depth[i] * 2, QLatin1Char(' ')) + m_nodes[i].name;
+    if (m_nodes[i].isBone) line += QStringLiteral("  [bone]");
+    if (!m_nodes[i].meshInfo.isEmpty()) {
+      // 同じメッシュ名の重複は ×N にまとめる (登場順を保つ)。
+      QStringList names, parts;
+      QMap<QString, int> counts;
+      for (const QString& m : m_nodes[i].meshInfo) {
+        if (!counts.contains(m)) names << m;
+        ++counts[m];
+      }
+      for (const QString& m : names) {
+        parts << (counts[m] > 1 ? m + QStringLiteral(" ×%1").arg(counts[m]) : m);
+      }
+      line += QStringLiteral("  ▸ ") + parts.join(QStringLiteral(", "));
+    }
+    m_infoLines << line;
+    m_infoTree.push_back({line.trimmed(), depth[i], int(i)});
+  }
+}
+
+void ModelView::setHighlightNode(int node) {
+  m_hiJoint  = -1;
+  m_hiActive = m_hiBoneOn = false;
+  m_hiSub.assign(m_submeshes.size(), 0);
+  m_hiBone.assign(128, 0.0f);
+  if (node >= 0 && node < int(m_nodes.size())) {
+    if (m_nodes[node].isBone) {
+      // ボーン: 影響するウェイトの色付けと、関節のリング。
+      for (size_t id = 0; id < m_boneNode.size() && id < m_hiBone.size(); ++id) {
+        if (m_boneNode[id] == node) m_hiBone[id] = 1.0f;
+      }
+      m_hiBoneOn = true;
+      m_hiJoint  = node;
+    } else {
+      // メッシュ / グループ: 配下 (自分を含む) のサブメッシュ。全部が対象 (根など) なら強調しない。
+      size_t hit = 0;
+      for (size_t i = 0; i < m_submeshes.size(); ++i) {
+        for (int p = m_submeshes[i].node; p >= 0; p = m_nodes[p].parent) {
+          if (p == node) {
+            m_hiSub[i] = 1;
+            ++hit;
+            break;
+          }
+        }
+      }
+      m_hiActive = hit > 0 && hit < m_submeshes.size();
+    }
+  }
+  renderFrame();
+}
+
+QStringList ModelView::nodeInfoLines(int ni) const {
+  QStringList out;
+  if (ni < 0 || ni >= int(m_nodes.size())) return out;
+  const auto isPseudo = [](const QString& n) { return n.contains(QLatin1String("$AssimpFbx$")); };
+  // assimp の補助ノード ($AssimpFbx$) を飛ばした、最も近い実ノードの親。
+  const auto realParent = [&](int i) {
+    int p = m_nodes[i].parent;
+    while (p >= 0 && isPseudo(m_nodes[p].name)) {
+      p = m_nodes[p].parent;
+    }
+    return p;
+  };
+  const Node& nd = m_nodes[ni];
+  out << QStringLiteral("名前: %1").arg(nd.name);
+  out << QStringLiteral("種別: %1")
+             .arg(nd.isBone ? QStringLiteral("ボーン")
+                            : (nd.meshes.empty() ? QStringLiteral("グループ / Null") : QStringLiteral("メッシュ")));
+  const int rp = realParent(ni);
+  out << QStringLiteral("親: %1").arg(rp >= 0 ? m_nodes[rp].name : QStringLiteral("(なし)"));
+  int children = 0;
+  for (size_t j = 0; j < m_nodes.size(); ++j) {
+    if (!isPseudo(m_nodes[j].name) && realParent(int(j)) == ni) ++children;
+  }
+  out << QStringLiteral("子: %1 個").arg(children);
+
+  // ローカル変換: 補助ノード (Translation/PreRotation/…) を含めて親から見た変換にまとめる。
+  QMatrix4x4 local = nd.bind;
+  for (int p = nd.parent; p >= 0 && isPseudo(m_nodes[p].name); p = m_nodes[p].parent) {
+    local = m_nodes[p].bind * local;
+  }
+  const QVector3D t(local(0, 3), local(1, 3), local(2, 3));
+  const QVector3D s(columnLength(local, 0), columnLength(local, 1), columnLength(local, 2));
+  QMatrix3x3      rm;
+  for (int r = 0; r < 3; ++r) {
+    for (int cc = 0; cc < 3; ++cc) {
+      rm(r, cc) = s[cc] > 1e-12f ? local(r, cc) / s[cc] : (r == cc ? 1.0f : 0.0f);
+    }
+  }
+  const QVector3D e = QQuaternion::fromRotationMatrix(rm).toEulerAngles();
+  out << QStringLiteral("位置: (%1, %2, %3)").arg(t.x(), 0, 'f', 3).arg(t.y(), 0, 'f', 3).arg(t.z(), 0, 'f', 3);
+  out << QStringLiteral("回転: (%1°, %2°, %3°)").arg(e.x(), 0, 'f', 1).arg(e.y(), 0, 'f', 1).arg(e.z(), 0, 'f', 1);
+  out << QStringLiteral("スケール: (%1, %2, %3)").arg(s.x(), 0, 'f', 3).arg(s.y(), 0, 'f', 3).arg(s.z(), 0, 'f', 3);
+
+  if (nd.isBone) {
+    out << QStringLiteral("影響する頂点: 延べ %1 (メッシュ %2 個)").arg(nd.boneWeights).arg(nd.boneMeshes);
+  }
+  for (const MeshDetail& m : nd.meshes) {
+    out << QString();
+    out << QStringLiteral("メッシュ: %1%2").arg(m.name, m.skinned ? QStringLiteral(" (スキン)") : QString());
+    out << QStringLiteral("  頂点 %1 · 三角形 %2").arg(m.vertices).arg(m.triangles);
+    out << QStringLiteral("  マテリアル: %1")
+               .arg(m.material.isEmpty() ? QStringLiteral("(なし)") : m.material);
+    if (m.skinned) out << QStringLiteral("  影響ボーン: %1 本").arg(m.bones);
+  }
+
+  // 子孫 (自分を含む) のメッシュ合計。親ノードや、メッシュを子に持つグループで役に立つ。
+  int totalV = 0, totalT = 0, totalM = 0;
+  for (size_t j = 0; j < m_nodes.size(); ++j) {
+    bool under = false;
+    for (int p = int(j); p >= 0; p = m_nodes[p].parent) {
+      if (p == ni) {
+        under = true;
+        break;
+      }
+    }
+    if (!under) continue;
+    for (const MeshDetail& m : m_nodes[j].meshes) {
+      totalV += m.vertices;
+      totalT += m.triangles;
+      ++totalM;
+    }
+  }
+  if (totalM > 0 && (children > 0)) {
+    out << QString();
+    out << QStringLiteral("配下のメッシュ合計: %1 個 · 頂点 %2 · 三角形 %3").arg(totalM).arg(totalV).arg(totalT);
+  }
+  return out;
 }
 
 void ModelView::setTextureEnabled(bool on) {
@@ -866,7 +1314,7 @@ void ModelView::renderFrame() {
   const QMatrix4x4 mvp     = proj * view;
   m_lastMvp                = mvp;  // スケルトンの 2D 投影に使う
   const QMatrix3x3 normal  = view.normalMatrix();
-  const bool       skinned = m_hasAnim && !m_boneMatrices.empty();
+  const bool       skinned = !m_boneMatrices.empty();
 
   m_prog.bind();
   m_prog.setUniformValue("uMVP", mvp);
@@ -877,10 +1325,18 @@ void ModelView::renderFrame() {
                                 std::min<int>(int(m_boneMatrices.size()), 128));
   m_prog.setUniformValue("uTex", 0);
   m_prog.setUniformValue("uUnlit", m_wireframe);  // ワイヤーフレームは陰影なし
+  m_prog.setUniformValue("uHiBoneOn", m_hiBoneOn && skinned);
+  if (m_hiBoneOn && skinned) {
+    m_prog.setUniformValueArray("uHiBone", m_hiBone.data(), std::min<int>(int(m_hiBone.size()), 128), 1);
+  }
 
   if (m_wireframe) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
   m_vao.bind();
-  for (const SubMesh& sm : m_submeshes) {
+  for (size_t smi = 0; smi < m_submeshes.size(); ++smi) {
+    const SubMesh&  sm     = m_submeshes[smi];
+    const bool      inSel  = m_hiActive && smi < m_hiSub.size() && m_hiSub[smi];
+    m_prog.setUniformValue("uTint", inSel ? 1.0f : 0.0f);
+    m_prog.setUniformValue("uDim", (m_hiActive && !inSel) ? 0.45f : 1.0f);
     const Material& mat    = m_materials[std::clamp(sm.material, 0, int(m_materials.size()) - 1)];
     const bool      useTex = m_texEnabled && mat.tex && !m_wireframe;
     m_prog.setUniformValue("uUseTexture", useTex);
@@ -985,7 +1441,63 @@ void ModelView::paintEvent(QPaintEvent*) {
     }
   }
 
-  // 左端に操作方法を列挙 (H キー / ツールバーで ON/OFF)。
+  // 選択中のボーンの関節に、リングと名前を出す (スケルトン表示の ON/OFF に関わらず)。
+  if (m_hiJoint >= 0 && m_hiJoint < int(m_jointWorld.size())) {
+    QPointF      c;
+    const QVector4D clip = m_lastMvp * QVector4D(m_jointWorld[m_hiJoint], 1.0f);
+    if (clip.w() > 1e-6f) {
+      c = QPointF((clip.x() / clip.w() * 0.5f + 0.5f) * width(),
+                  (1.0f - (clip.y() / clip.w() * 0.5f + 0.5f)) * height());
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(QColor(255, 140, 26), 2.0));
+      p.drawEllipse(c, 8.0, 8.0);
+      p.setPen(QColor(255, 190, 110));
+      p.drawText(QPointF(c.x() + 12, c.y() - 10), m_nodes[m_hiJoint].name);
+    }
+  }
+
+  // 左上のオーバーレイ: 上に「モデル全体の情報」、その下に「操作方法」(H キー / ツールバーで
+  // ON/OFF)。どちらも同じ半透明の黒い背景に載せる。
+  QFont hf = p.font();
+  hf.setPointSizeF(10.0);
+  p.setFont(hf);
+  const QFontMetrics fm(hf);
+  const int          lh = fm.height() + 3;
+  const int          padX = 10, padY = 8;
+  const auto         drawPanel = [&](const QStringList& rows, int top, bool elide) -> int {
+    int maxW = 0;
+    for (const QString& r : rows) maxW = std::max(maxW, fm.horizontalAdvance(r));
+    maxW += 4;                              // 測定誤差で最長の行まで省略されないように余裕を持たせる
+    if (elide) maxW = std::min(maxW, 380);  // 長い行 (テクスチャのパスなど) は幅に収める
+    const QRectF box(10, top, maxW + padX * 2, int(rows.size()) * lh + padY * 2 - 3);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(20, 22, 26, 150));
+    p.drawRoundedRect(box, 6, 6);
+    p.setPen(QColor(210, 214, 220));
+    int y = int(box.top()) + padY + fm.ascent();
+    for (const QString& r : rows) {
+      p.drawText(int(box.left()) + padX, y, elide ? fm.elidedText(r, Qt::ElideMiddle, maxW) : r);
+      y += lh;
+    }
+    return int(box.bottom());
+  };
+
+  int nextTop = 10;
+  if (m_hasModel) {
+    QStringList info;
+    for (const QString& l : m_infoHeader) {
+      // 要約 (メッシュ数 · マテリアル数 · 頂点数 · 三角形数 …) は 2 項目ずつに折って縦長にする。
+      if (l == m_summary) {
+        const QStringList parts = l.split(QStringLiteral(" · "));
+        for (int k = 0; k < parts.size(); k += 2) {
+          info << (k + 1 < parts.size() ? parts[k] + QStringLiteral(" · ") + parts[k + 1] : parts[k]);
+        }
+      } else {
+        info << l;
+      }
+    }
+    nextTop = drawPanel(info, nextTop, /*elide=*/true) + 8;
+  }
   if (m_showHelp) {
     QStringList rows;
     rows << QStringLiteral("矢印 : 回転")
@@ -1000,27 +1512,7 @@ void ModelView::paintEvent(QPaintEvent*) {
     if (m_hasAnim) rows << QStringLiteral("Space : 再生 / 停止");
     rows << QStringLiteral("H : 操作の表示")
          << QStringLiteral("i : モデル情報");
-
-    QFont hf = p.font();
-    hf.setPointSizeF(10.0);
-    p.setFont(hf);
-    const QFontMetrics fm(hf);
-    const int lh   = fm.height() + 3;
-    int       maxW = 0;
-    for (const QString& r : rows) maxW = std::max(maxW, fm.horizontalAdvance(r));
-    const int padX = 10, padY = 8;
-    const int boxW = maxW + padX * 2;
-    const int boxH = int(rows.size()) * lh + padY * 2 - 3;
-    const QRectF box(10, 10, boxW, boxH);
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(20, 22, 26, 150));
-    p.drawRoundedRect(box, 6, 6);
-    p.setPen(QColor(210, 214, 220));
-    int y = int(box.top()) + padY + fm.ascent();
-    for (const QString& r : rows) {
-      p.drawText(int(box.left()) + padX, y, r);
-      y += lh;
-    }
+    drawPanel(rows, nextTop, /*elide=*/false);
   }
 }
 

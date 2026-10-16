@@ -5,15 +5,22 @@
 //   farman_model_poc <model file> --shot <png> --time <s> … 指定アニメ時刻で
 //   farman_model_poc <model file> --uishot <png>        … UI 込みの見た目を PNG
 //   ... --no-texture                                    … テクスチャ OFF
+//   ... --infosel <ノード名>                            … --infoshot でそのノードを選択 (前方一致)
+//   farman_model_poc <model file> --infoshot <png>      … 情報パネル (i) を開いた状態を PNG に保存
+//   farman_model_poc <model file> --info                … 情報ウィンドウの内容を標準出力へ
 
 #include "ModelView.h"
 #include "ModelViewerWidget.h"
 
 #include <QApplication>
+#include <QDialog>
+#include <QTreeWidget>
 #include <QImage>
 #include <QPixmap>
 #include <QStringList>
 #include <QSurfaceFormat>
+
+#include <cstdio>
 
 namespace {
 
@@ -43,6 +50,9 @@ int main(int argc, char** argv) {
   bool    noTexture = false;
   bool    wire      = false;
   bool    bones     = false;
+  bool    info      = false;
+  QString infoshotPath, infoSelect;
+  bool    verboseInfo = false;
   double  timeOpt   = -1.0;
   const QStringList args = app.arguments();
   for (int i = 1; i < args.size(); ++i) {
@@ -58,6 +68,14 @@ int main(int argc, char** argv) {
       wire = true;
     else if (args[i] == QLatin1String("--bones"))
       bones = true;
+    else if (args[i] == QLatin1String("--info"))
+      info = true;
+    else if (args[i] == QLatin1String("--infoshot") && i + 1 < args.size())
+      infoshotPath = args[++i];
+    else if (args[i] == QLatin1String("--info-nodes"))
+      info = verboseInfo = true;
+    else if (args[i] == QLatin1String("--infosel") && i + 1 < args.size())
+      infoSelect = args[++i];
     else if (modelPath.isEmpty())
       modelPath = args[i];
   }
@@ -86,7 +104,38 @@ int main(int argc, char** argv) {
   for (const QString& p : view->resolvedTexturePaths())
     qInfo("  解決パス              : %s", qPrintable(p));
   if (view->hasAnimation()) qInfo("animation: %.2f s", view->animationDuration());
+  if (info) {
+    // 情報ウィンドウ (i) と同じ内容。
+    puts(qPrintable(view->view()->infoLines().join(QStringLiteral("\n"))));
+    if (verboseInfo) {
+      // --info-nodes: 各ノードの詳細 (情報ウィンドウの下の枠と同じ内容) も出す。
+      for (const Farman::ModelView::InfoNode& n : view->view()->infoTree()) {
+        puts(qPrintable(QStringLiteral("\n--- ") + n.label));
+        puts(qPrintable(view->view()->nodeInfoLines(n.node).join(QStringLiteral("\n"))));
+      }
+    }
+    return 0;
+  }
 
+  if (!infoshotPath.isEmpty()) {
+    // 情報パネルを開いて (i キー相当)、ウィジェット全体を PNG に保存する。
+    view->resize(1100, 640);
+    view->show();
+    QMetaObject::invokeMethod(view->view(), "infoRequested");
+    QApplication::processEvents();
+    if (!infoSelect.isEmpty()) {
+      // --infosel <ノード名>: 階層でそのノードを選んだ状態にする。
+      if (auto* tree = view->findChild<QTreeWidget*>()) {
+        const auto hits = tree->findItems(infoSelect, Qt::MatchStartsWith | Qt::MatchRecursive);
+        if (!hits.isEmpty()) tree->setCurrentItem(hits.first());
+        QApplication::processEvents();
+      }
+    }
+    view->view()->renderToImage();
+    const bool ok = view->grab().save(infoshotPath);
+    qInfo("infoshot %s: %s", ok ? "saved" : "FAILED", qPrintable(infoshotPath));
+    return ok ? 0 : 1;
+  }
   if (!uishotPath.isEmpty()) {
     view->renderToImage();  // 3D フレームを用意
     const QPixmap pm = view->grab();

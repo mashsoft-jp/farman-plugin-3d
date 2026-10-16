@@ -5,23 +5,70 @@
 #include <QAction>
 #include <QApplication>
 #include <QDialog>
+#include <QFontDatabase>
 #include <QDialogButtonBox>
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
+#include <QHBoxLayout>
 #include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSplitter>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QSizePolicy>
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace Farman {
 
 namespace {
+
+// ノード階層ツリー。標準の開閉記号に加えて、親子をつなぐ接続線 (├ └ │) を描く。
+class NodeTree : public QTreeWidget {
+ public:
+  using QTreeWidget::QTreeWidget;
+
+ protected:
+  void drawBranches(QPainter* p, const QRect& rect, const QModelIndex& index) const override {
+    // 行の分岐領域は (深さ + 1) 個のセルで、右端のセルが自分の開閉記号の位置。
+    QVector<QModelIndex> chain;  // 根 → 自分
+    for (QModelIndex a = index; a.isValid(); a = a.parent()) {
+      chain.prepend(a);
+    }
+    const int cell  = indentation();
+    const int depth = chain.size() - 1;
+    if (cell > 0 && depth >= 1) {
+      QColor col = palette().color(QPalette::Text);
+      col.setAlpha(90);
+      p->save();
+      p->setPen(QPen(col, 1));
+      const int left = rect.right() + 1 - cell * (depth + 1);
+      const int top = rect.top(), bottom = rect.bottom(), mid = (rect.top() + rect.bottom()) / 2;
+      for (int k = 1; k < depth; ++k) {  // 祖先の続き線 (後ろにきょうだいがあるときだけ)
+        if (chain[k].sibling(chain[k].row() + 1, 0).isValid()) {
+          const int x = left + cell * k + cell / 2;
+          p->drawLine(x, top, x, bottom);
+        }
+      }
+      const int  x        = left + cell * depth + cell / 2;
+      const bool hasNext  = index.sibling(index.row() + 1, 0).isValid();
+      const bool hasChild = model()->hasChildren(index);
+      p->drawLine(x - cell, top, x - cell, hasNext ? bottom : mid);  // 親の幹 → この行
+      p->drawLine(x - cell, mid, hasChild ? x - 6 : x + cell / 2 - 1, mid);  // 枝
+      p->restore();
+    }
+    QTreeWidget::drawBranches(p, rect, index);
+  }
+};
 
 enum class Glyph { Texture, Grid, Wire, Cull, Bones, Play, Pause, Reset, Help, Info };
 
@@ -190,8 +237,18 @@ ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
   m_toolbar->setStyleSheet(toolbarStyleSheet());
   m_view = new ModelView(this);
 
+  // ツールバーの下は、左に 3D ビュー・右に情報パネル (初期は非表示) の左右分割。
+  m_split = new QSplitter(Qt::Horizontal, this);
+  m_split->setChildrenCollapsible(false);
+  m_split->addWidget(m_view);
+  m_infoPanel = buildInfoPanel();
+  m_infoPanel->hide();
+  m_split->addWidget(m_infoPanel);
+  m_split->setStretchFactor(0, 1);
+  m_split->setStretchFactor(1, 0);
+
   lay->addWidget(m_toolbar);
-  lay->addWidget(m_view, 1);
+  lay->addWidget(m_split, 1);
   setFocusProxy(m_view);
 
   const QColor ic = palette().color(QPalette::ButtonText);
@@ -291,30 +348,143 @@ ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
   infoFont.setItalic(true);
   infoFont.setBold(true);
   m_infoButton->setFont(infoFont);
-  m_infoButton->setToolTip(QStringLiteral("モデル情報を別ウィンドウで表示 (i)"));
+  m_infoButton->setToolTip(QStringLiteral("ノード情報パネルの表示 / 非表示 (i)"));
   m_infoButton->setFocusPolicy(Qt::NoFocus);
-  connect(m_infoButton, &QToolButton::clicked, this, &ModelViewerWidget::openInfoDialog);
+  m_infoButton->setCheckable(true);  // 表示中は押した状態
+  connect(m_infoButton, &QToolButton::clicked, this, &ModelViewerWidget::toggleInfoPanel);
   m_toolbar->addWidget(m_infoButton);
-  connect(m_view, &ModelView::infoRequested, this, &ModelViewerWidget::openInfoDialog);
+  connect(m_view, &ModelView::infoRequested, this, &ModelViewerWidget::toggleInfoPanel);
 }
 
-void ModelViewerWidget::openInfoDialog() {
-  if (!m_infoDialog) {
-    m_infoDialog = new QDialog(this);
-    m_infoDialog->setWindowTitle(QStringLiteral("モデル情報"));
-    auto* dl = new QVBoxLayout(m_infoDialog);
-    m_infoText = new QPlainTextEdit(m_infoDialog);
-    m_infoText->setReadOnly(true);
-    dl->addWidget(m_infoText);
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, m_infoDialog);
-    connect(bb, &QDialogButtonBox::rejected, m_infoDialog, &QDialog::close);
-    dl->addWidget(bb);
-    m_infoDialog->resize(480, 260);
+// 右側の情報パネル (ノード階層 + 選択ノードの詳細) を作る。
+QWidget* ModelViewerWidget::buildInfoPanel() {
+  auto* panel = new QWidget(this);
+  panel->setMinimumWidth(220);
+  auto* vl = new QVBoxLayout(panel);
+  vl->setContentsMargins(8, 8, 8, 8);
+
+  auto* row = new QHBoxLayout;
+  row->addWidget(new QLabel(QStringLiteral("ノード階層"), panel));
+  row->addStretch(1);
+  auto* expandAll   = new QPushButton(QStringLiteral("すべて展開"), panel);
+  auto* collapseAll = new QPushButton(QStringLiteral("すべて閉じる"), panel);
+  for (QPushButton* b : {expandAll, collapseAll}) {
+    b->setAutoDefault(false);
+    b->setDefault(false);
+    b->setFocusPolicy(Qt::TabFocus);  // クリックではフォーカスを奪わない (ツリーに残る)
   }
-  m_infoText->setPlainText(m_view->infoLines().join(QStringLiteral("\n")));
-  m_infoDialog->show();
-  m_infoDialog->raise();
-  m_infoDialog->activateWindow();
+  row->addWidget(expandAll);
+  row->addWidget(collapseAll);
+  vl->addLayout(row);
+
+  m_infoTree = new NodeTree(panel);
+  m_infoTree->setHeaderHidden(true);
+  m_infoTree->setUniformRowHeights(true);
+  m_infoTree->setIndentation(18);
+  m_infoTree->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+  m_infoTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_infoTree->setFocusPolicy(Qt::StrongFocus);
+  m_infoTree->setMinimumHeight(60);
+  m_infoTree->installEventFilter(this);
+
+  m_nodeText = new QPlainTextEdit(panel);
+  m_nodeText->setReadOnly(true);
+  m_nodeText->setLineWrapMode(QPlainTextEdit::NoWrap);
+  m_nodeText->setPlaceholderText(QStringLiteral("ノードを選ぶと、ここに詳細を表示します"));
+  m_nodeText->setMinimumHeight(48);
+  m_nodeText->installEventFilter(this);
+
+  // 階層 (上) と、選択中のノードの詳細 (下) は、つまみで高さを変えられる分割。
+  auto* split = new QSplitter(Qt::Vertical, panel);
+  split->addWidget(m_infoTree);
+  split->addWidget(m_nodeText);
+  split->setStretchFactor(0, 3);
+  split->setStretchFactor(1, 2);
+  split->setChildrenCollapsible(false);
+  vl->addWidget(split, 1);
+
+  connect(m_infoTree, &QTreeWidget::currentItemChanged, this,
+          [this](QTreeWidgetItem* cur, QTreeWidgetItem*) {
+            if (!cur) {
+              m_nodeText->clear();
+              m_view->setHighlightNode(-1);
+              return;
+            }
+            const int node = cur->data(0, Qt::UserRole).toInt();
+            m_nodeText->setPlainText(m_view->nodeInfoLines(node).join(QStringLiteral("\n")));
+            // 選択したノードを 3D ビューでも強調する (パネルを開いているときだけ)。
+            m_view->setHighlightNode(m_infoPanel && m_infoPanel->isVisible() ? node : -1);
+          });
+  // ボタンを押したら、フォーカスはツリーに戻す (Tab で当てたボタンの枠を残さない)。
+  connect(expandAll, &QPushButton::clicked, this, [this] {
+    m_infoTree->expandAll();
+    m_infoTree->setFocus();
+  });
+  connect(collapseAll, &QPushButton::clicked, this, [this] {
+    m_infoTree->collapseAll();
+    for (int i = 0; i < m_infoTree->topLevelItemCount(); ++i) {
+      m_infoTree->topLevelItem(i)->setExpanded(true);  // 最上位は開いたまま
+    }
+    m_infoTree->setFocus();
+  });
+  // Tab の順は ツリー → 一括展開 → 一括閉じ → 詳細。
+  QWidget::setTabOrder(m_infoTree, expandAll);
+  QWidget::setTabOrder(expandAll, collapseAll);
+  QWidget::setTabOrder(collapseAll, m_nodeText);
+  return panel;
+}
+
+// 情報パネルの表示 / 非表示 (i キー・「i」ボタン)。表示したらツリーに、隠したらビューにフォーカス。
+void ModelViewerWidget::toggleInfoPanel() {
+  const bool show = !m_infoPanel->isVisible();
+  m_infoPanel->setVisible(show);
+  {
+    QSignalBlocker b(m_infoButton);
+    m_infoButton->setChecked(show);
+  }
+  if (show) {
+    const int total  = m_split->width();
+    const int panelW = std::clamp(total / 3, 260, 420);
+    m_split->setSizes({std::max(120, total - panelW), panelW});
+    m_infoTree->setFocus();  // 開いてすぐ、矢印キー・クリックでツリーを操作できる
+    if (auto* cur = m_infoTree->currentItem()) m_view->setHighlightNode(cur->data(0, Qt::UserRole).toInt());
+  } else {
+    m_view->setHighlightNode(-1);  // パネルを閉じたら強調も解除
+    m_view->setFocus();
+  }
+}
+
+// パネル内にフォーカスがあるときも、i / Esc で閉じられるようにする。
+bool ModelViewerWidget::eventFilter(QObject* obj, QEvent* ev) {
+  if ((obj == m_infoTree || obj == m_nodeText) && ev->type() == QEvent::KeyPress) {
+    auto* ke = static_cast<QKeyEvent*>(ev);
+    if ((ke->key() == Qt::Key_I && ke->modifiers() == Qt::NoModifier) || ke->key() == Qt::Key_Escape) {
+      toggleInfoPanel();
+      return true;
+    }
+  }
+  return QWidget::eventFilter(obj, ev);
+}
+
+// 情報パネルのノード階層を、いまのモデルで作り直す。
+void ModelViewerWidget::fillInfoPanel() {
+  m_infoTree->clear();
+  std::vector<QTreeWidgetItem*> stack;  // 深さごとの直近のノード
+  for (const ModelView::InfoNode& n : m_view->infoTree()) {
+    QTreeWidgetItem* item = new QTreeWidgetItem(QStringList{n.label});
+    item->setData(0, Qt::UserRole, n.node);
+    while (int(stack.size()) > n.depth) {
+      stack.pop_back();
+    }
+    if (stack.empty()) {
+      m_infoTree->addTopLevelItem(item);
+    } else {
+      stack.back()->addChild(item);
+    }
+    stack.push_back(item);
+  }
+  m_infoTree->expandAll();
+  if (m_infoTree->topLevelItemCount() > 0) m_infoTree->setCurrentItem(m_infoTree->topLevelItem(0));
 }
 
 void ModelViewerWidget::refreshToolbar() {
@@ -343,8 +513,7 @@ void ModelViewerWidget::refreshToolbar() {
 bool ModelViewerWidget::loadModel(const QString& path, QString* error) {
   const bool ok = m_view->loadModel(path, error);
   refreshToolbar();
-  if (m_infoDialog && m_infoDialog->isVisible())
-    m_infoText->setPlainText(m_view->infoLines().join(QStringLiteral("\n")));
+  fillInfoPanel();
   return ok;
 }
 

@@ -17,6 +17,8 @@ class QToolButton;
 class QLabel;
 class QDialog;
 class QPlainTextEdit;
+class QSplitter;
+class QTreeWidget;
 
 namespace Farman {
 
@@ -52,7 +54,10 @@ public:
 
 private:
   void refreshToolbar();
-  void openInfoDialog();
+  QWidget* buildInfoPanel();
+  void     toggleInfoPanel();
+  void     fillInfoPanel();
+  bool     eventFilter(QObject* obj, QEvent* ev) override;
 
   ModelView*      m_view       = nullptr;
   QToolBar*       m_toolbar    = nullptr;
@@ -65,8 +70,10 @@ private:
   QAction*        m_actPlay    = nullptr;
   QToolButton*    m_infoButton = nullptr;
   QLabel*         m_pathLabel  = nullptr;
-  QDialog*        m_infoDialog = nullptr;
-  QPlainTextEdit* m_infoText   = nullptr;
+  QSplitter*      m_split      = nullptr;  // 左: 3D ビュー / 右: 情報パネル
+  QWidget*        m_infoPanel  = nullptr;  // ノード階層 + 詳細 (初期は非表示)
+  QTreeWidget*    m_infoTree   = nullptr;  // ノード階層 (開閉できる)
+  QPlainTextEdit* m_nodeText   = nullptr;  // 選択中のノードの詳細
 };
 
 } // namespace Farman
