@@ -2,7 +2,7 @@
 // ModelViewerWidget (ツールバー + ModelView) を表示する検証用アプリ。
 //   farman_model_poc <model file>                       … ウィンドウ表示
 //   farman_model_poc <model file> --shot <png>          … 3D をオフスクリーン PNG
-//   farman_model_poc <model file> --shot <png> --time <s> … 指定アニメ時刻で
+//   farman_model_poc <model file> --shot <png> --time <s> … 指定アニメ時刻で (--uishot / --infoshot にも効く)
 //   farman_model_poc <model file> --uishot <png>        … UI 込みの見た目を PNG
 //   ... --no-texture                                    … テクスチャ OFF
 //   ... --infosel <ノード名>                            … --infoshot でそのノードを選択 (前方一致)
@@ -104,6 +104,8 @@ int main(int argc, char** argv) {
   for (const QString& p : view->resolvedTexturePaths())
     qInfo("  解決パス              : %s", qPrintable(p));
   if (view->hasAnimation()) qInfo("animation: %.2f s", view->animationDuration());
+  // --time <秒>: --shot だけでなく --uishot / --infoshot でも、指定したアニメ時刻の姿勢にする。
+  if (view->hasAnimation() && timeOpt >= 0 && shotPath.isEmpty()) view->setAnimationTime(timeOpt);
   if (info) {
     // 情報ウィンドウ (i) と同じ内容。
     puts(qPrintable(view->view()->infoLines().join(QStringLiteral("\n"))));

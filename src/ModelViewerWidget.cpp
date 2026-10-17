@@ -7,6 +7,7 @@
 #include <QDialog>
 #include <QFontDatabase>
 #include <QDialogButtonBox>
+#include <QFileInfo>
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
@@ -499,13 +500,20 @@ void ModelViewerWidget::refreshToolbar() {
 
   const QStringList ext = m_view->resolvedTexturePaths() + m_view->unresolvedTexturePaths();
   if (!ext.isEmpty()) {
-    m_pathLabel->setText(QStringLiteral("テクスチャ: ") + ext.join(QStringLiteral("  /  ")));
+    // ツールバーはファイル名だけ (フルパスは長くて「i」ボタンを押し出すため)。フルパスはツールチップ。
+    QStringList names;
+    for (const QString& p : ext) {
+      names << QFileInfo(p).fileName();
+    }
+    m_pathLabel->setText(QStringLiteral("テクスチャ: ") + names.join(QStringLiteral("  /  ")));
+    m_pathLabel->setToolTip(ext.join(QStringLiteral("\n")));
     m_pathLabel->show();
   } else if (m_view->hasEmbeddedTexture()) {
     m_pathLabel->setText(QStringLiteral("テクスチャ: 埋め込み"));
     m_pathLabel->show();
   } else {
     m_pathLabel->clear();
+    m_pathLabel->setToolTip(QString());
     m_pathLabel->hide();
   }
 }

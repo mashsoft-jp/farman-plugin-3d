@@ -488,6 +488,7 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   }
   const bool willAnimate = animated && scene->mAnimations[0]->mDuration > 0.0 && anySkinnedMesh;
   m_staticSkin           = anySkinnedMesh && !willAnimate;
+  const bool animatedSkin = anySkinnedMesh && willAnimate;  // アニメ付きのスキンモデル
 
   // ── ジオメトリ + サブメッシュ + スキンウェイト ──
   std::vector<float>        verts;
@@ -528,6 +529,14 @@ bool ModelView::loadModel(const QString& path, QString* error) {
                                   (skinned ? QStringLiteral(" (スキン)") : QString());
       // ボーンを祖先に持たない静的メッシュは、スキン付きメッシュと同じ寸法にそろえる。
       const bool       underBone = m_nodes[ni].isBone || m_nodes[ni].boneParent >= 0;
+      // アニメ付きのスキンモデルで、ボーン (の子) に付いた静的メッシュ (手に持たせた剣など) は、
+      // 最も近い祖先ボーンにウェイト 1 で貼り付けて、アニメに追従させる。バインド時の位置は
+      // ノードのバインド姿勢 ([plainGlobal]) で頂点に焼き込み、ボーン行列は
+      // 現在配置 * inverse(バインド配置) (= offset) になる。
+      int rigidBone = -1;
+      if (!skinned && animatedSkin) {
+        rigidBone = m_nodes[ni].isBone ? int(ni) : m_nodes[ni].boneParent;
+      }
       QMatrix4x4 xf;
       if (skinned && m_staticSkin) {
         // 静止描画のスキン付きメッシュ: メッシュ変換を縮尺をそろえて頂点に焼き込む。
@@ -538,6 +547,8 @@ bool ModelView::loadModel(const QString& path, QString* error) {
         xf = q * plainGlobal[ni];
       } else if (skinned) {
         xf = QMatrix4x4();  // アニメ付き: offset 行列がメッシュの配置を担う
+      } else if (rigidBone >= 0) {
+        xf = plainGlobal[ni];
       } else {
         xf = underBone ? nodeGlobal[ni] : m_meshNorm * nodeGlobal[ni];
       }
@@ -552,6 +563,35 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       std::vector<std::array<float, 4>> vid(mesh->mNumVertices, {0, 0, 0, 0});
       std::vector<std::array<float, 4>> vwt(mesh->mNumVertices, {0, 0, 0, 0});
       std::vector<int>                  cnt(mesh->mNumVertices, 0);
+      if (rigidBone >= 0) {
+        // 祖先ボーンへの剛体スキニング: この (名前, offset) のエントリを探し、無ければ作る。
+        const std::string bname = nodePtr[rigidBone]->mName.C_Str();
+        const QMatrix4x4  off   = plainGlobal[rigidBone].inverted();
+        auto&             ids   = boneId[bname];
+        int               id    = -1;
+        for (int cand : ids) {
+          bool same = true;
+          for (int k = 0; k < 16 && same; ++k) {
+            same = std::abs(m_boneOffset[cand].constData()[k] - off.constData()[k]) <= 1e-4f;
+          }
+          if (same) {
+            id = cand;
+            break;
+          }
+        }
+        if (id < 0 && m_boneOffset.size() < 128) {
+          id = int(m_boneOffset.size());
+          ids.push_back(id);
+          m_boneOffset.push_back(off);
+          m_boneNode.push_back(rigidBone);
+        }
+        if (id >= 0) {
+          for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+            vid[v][0] = float(id);
+            vwt[v][0] = 1.0f;
+          }
+        }
+      }
       for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
         const aiBone*     bone = mesh->mBones[b];
         const std::string name = bone->mName.C_Str();
@@ -1492,6 +1532,16 @@ void ModelView::paintEvent(QPaintEvent*) {
         for (int k = 0; k < parts.size(); k += 2) {
           info << (k + 1 < parts.size() ? parts[k] + QStringLiteral(" · ") + parts[k + 1] : parts[k]);
         }
+      } else if (l.startsWith(QStringLiteral("tex: "))) {
+        // テクスチャはファイル名だけ (フルパスだとパネルが横に広がって、モデルに重なる)。
+        QString       rest   = l.mid(5);
+        const QString miss   = QStringLiteral(" (見つからず)");
+        QString       suffix;
+        if (rest.endsWith(miss)) {
+          suffix = miss;
+          rest.chop(miss.size());
+        }
+        info << QStringLiteral("tex: ") + QFileInfo(rest).fileName() + suffix;
       } else {
         info << l;
       }
