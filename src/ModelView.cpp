@@ -340,7 +340,12 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       m_nodes.push_back({QString::fromUtf8(it.n->mName.C_Str()), local, it.parent});
       nodePtr.push_back(it.n);
       nodeGlobal.push_back(local);  // 仮置き。継承ルールを反映して下で作り直す
-      nodeIndex[it.n->mName.C_Str()] = idx;
+      // 同名ノードがある場合 (FBX でボーン "Body" とメッシュノード "Body" が衝突する等)、
+      // ボーン/アニメの参照先はメッシュを持たない方を優先する。
+      auto dup = nodeIndex.find(it.n->mName.C_Str());
+      if (dup == nodeIndex.end() || (nodePtr[dup->second]->mNumMeshes > 0 && it.n->mNumMeshes == 0)) {
+        nodeIndex[it.n->mName.C_Str()] = idx;
+      }
       for (int c = int(it.n->mNumChildren) - 1; c >= 0; --c)
         stack.push_back({it.n->mChildren[c], idx});
     }
