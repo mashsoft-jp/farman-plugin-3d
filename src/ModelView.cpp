@@ -305,11 +305,18 @@ bool ModelView::loadModel(const QString& path, QString* error) {
                              aiProcess_ImproveCacheLocality;
   const aiScene* scene = importer.ReadFile(path.toUtf8().constData(), flags);
   if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode) {
-    if (error) *error = QString::fromUtf8(importer.GetErrorString());
+    if (error) {
+      *error = QString::fromUtf8(importer.GetErrorString());
+      if (path.endsWith(QLatin1String(".blend"), Qt::CaseInsensitive)) {
+        // Blender の読み込みは assimp の制約が大きい (新しい形式・圧縮された .blend は読めないことがある)。
+        *error += QStringLiteral("\n(新しい Blender で保存した .blend は読めないことがあります。FBX や glTF に書き出してお試しください)");
+      }
+    }
     return false;
   }
 
   const bool animated = scene->mNumAnimations > 0;
+  const bool isBlend  = path.endsWith(QLatin1String(".blend"), Qt::CaseInsensitive);
 
   // ── ノード階層 (DFS 前順) ──
   m_nodes.clear();
@@ -323,7 +330,13 @@ bool ModelView::loadModel(const QString& path, QString* error) {
       Item it = stack.back();
       stack.pop_back();
       const int        idx   = int(m_nodes.size());
-      const QMatrix4x4 local = toQM(it.n->mTransformation);
+      QMatrix4x4 local = toQM(it.n->mTransformation);
+      if (it.parent < 0 && isBlend) {
+        // Blender は Z が上。assimp はこれを変換しないので、ルートで Y 上に回して立たせる。
+        QMatrix4x4 zUpToYUp;
+        zUpToYUp.rotate(-90.0f, 1.0f, 0.0f, 0.0f);
+        local = zUpToYUp * local;
+      }
       m_nodes.push_back({QString::fromUtf8(it.n->mName.C_Str()), local, it.parent});
       nodePtr.push_back(it.n);
       nodeGlobal.push_back(local);  // 仮置き。継承ルールを反映して下で作り直す

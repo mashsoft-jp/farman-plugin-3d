@@ -6,14 +6,15 @@
 
 namespace Farman {
 
-// 3D モデル (.fbx) を表示する farman 用の外部ビュアープラグイン。
+// 3D モデル (.fbx / .obj / .gltf / .glb / .blend) を表示する farman 用の外部ビュアープラグイン。
 // IViewerPlugin (IID com.farman.IViewerPlugin/5.0) を実装する。farman 本体には
 // 同梱せず外部配布し、ユーザーが外部プラグインディレクトリ
 // <AppData>/plugins/viewers/ に置くと farman が起動時に動的ロードする。
 //
-// 描画本体は ModelView (Assimp + QOpenGLWidget)。まず FBX に対応し、今後
-// obj/gltf 等へ拡張予定。IViewerPlugin.cpp は farman 内部 (Logger/Settings) に
-// 依存するため vendoring せず、version() / canHandle() はここで override する。
+// 描画本体は ModelView (Assimp + QOpenGLWidget)。FBX / OBJ / glTF (glb 含む) / Blender を
+// 読む (Blender は assimp の制約で、メッシュとマテリアルのみ。骨格・アニメは非対応)。
+// IViewerPlugin.cpp は farman 内部 (Logger/Settings) に依存するため vendoring せず、
+// version() / canHandle() はここで override する。
 class ModelViewerPlugin : public QObject, public IViewerPlugin {
   Q_OBJECT
   // metadata.json の "MinHostVersion" で必要な farman 本体の最小バージョンを宣言。
@@ -41,7 +42,10 @@ public:
   // 外部プラグインは priority 0〜9999 (10000 以上は同梱公式の予約域)。
   int priority() const override { return 100; }
 
-  QStringList supportedExtensions() const override { return {QStringLiteral("fbx")}; }
+  QStringList supportedExtensions() const override {
+    return {QStringLiteral("fbx"), QStringLiteral("obj"), QStringLiteral("gltf"),
+            QStringLiteral("glb"), QStringLiteral("blend")};
+  }
   QStringList supportedMimeTypes() const override { return {}; }
 
   bool     canHandle(const QString& filePath) const override;

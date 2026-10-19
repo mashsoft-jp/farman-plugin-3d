@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
-project(farman-plugin-3d VERSION 0.4.0 LANGUAGES CXX)
+project(farman-plugin-3d VERSION 1.0.0 LANGUAGES CXX)
 
 # farman 本体とは独立してビルドする、farman 用の外部ビュアープラグイン。
 # 成果物 ModelViewerPlugin.(dylib|so|dll) を farman の外部プラグインディレクトリ
-# <AppData>/plugins/viewers/ に置くと、farman が起動時にロードして .fbx を 3D
-# 表示する。詳細は README.md 参照。
+# <AppData>/plugins/viewers/ に置くと、farman が起動時にロードして .fbx / .obj /
+# .gltf / .glb / .blend を 3D 表示する。詳細は README.md 参照。
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
