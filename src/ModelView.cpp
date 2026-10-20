@@ -726,34 +726,43 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   m_hasAnim           = false;
   m_animDurationTicks = 0.0;
   m_ticksPerSec       = 25.0;
+  m_clips.clear();
+  m_clip = 0;
   if (animated) {
-    const aiAnimation* anim = scene->mAnimations[0];
-    m_animDurationTicks     = anim->mDuration;
-    m_ticksPerSec           = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0;
-    for (unsigned int c = 0; c < anim->mNumChannels; ++c) {
-      const aiNodeAnim* ch = anim->mChannels[c];
-      auto              it = nodeIndex.find(ch->mNodeName.C_Str());
-      if (it == nodeIndex.end()) continue;
-      // ノード名でチャンネルを対応付け、位置 / 回転 / スケールのキーフレーム列を貯める。
-      Channel& out = m_channels[it->second];
-      out.used     = true;
-      for (unsigned int k = 0; k < ch->mNumPositionKeys; ++k) {
-        out.pos.push_back({ch->mPositionKeys[k].mTime,
-                           QVector3D(ch->mPositionKeys[k].mValue.x, ch->mPositionKeys[k].mValue.y,
-                                     ch->mPositionKeys[k].mValue.z)});
+    // すべてのクリップを読み込んでおき、先頭を既定で再生する (setAnimationClip で切替)。
+    for (unsigned int ai = 0; ai < scene->mNumAnimations; ++ai) {
+      const aiAnimation* anim = scene->mAnimations[ai];
+      Clip               clip;
+      clip.name          = QString::fromUtf8(anim->mName.C_Str());
+      clip.durationTicks = anim->mDuration;
+      clip.ticksPerSec   = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0;
+      clip.channels.assign(m_nodes.size(), Channel{});
+      for (unsigned int c = 0; c < anim->mNumChannels; ++c) {
+        const aiNodeAnim* ch = anim->mChannels[c];
+        auto              it = nodeIndex.find(ch->mNodeName.C_Str());
+        if (it == nodeIndex.end()) continue;
+        // ノード名でチャンネルを対応付け、位置 / 回転 / スケールのキーフレーム列を貯める。
+        Channel& out = clip.channels[it->second];
+        out.used     = true;
+        for (unsigned int k = 0; k < ch->mNumPositionKeys; ++k) {
+          out.pos.push_back({ch->mPositionKeys[k].mTime,
+                             QVector3D(ch->mPositionKeys[k].mValue.x, ch->mPositionKeys[k].mValue.y,
+                                       ch->mPositionKeys[k].mValue.z)});
+        }
+        for (unsigned int k = 0; k < ch->mNumRotationKeys; ++k) {
+          const aiQuaternion& q = ch->mRotationKeys[k].mValue;
+          out.rot.push_back({ch->mRotationKeys[k].mTime, QQuaternion(q.w, q.x, q.y, q.z)});
+        }
+        for (unsigned int k = 0; k < ch->mNumScalingKeys; ++k) {
+          out.scale.push_back({ch->mScalingKeys[k].mTime,
+                               QVector3D(ch->mScalingKeys[k].mValue.x, ch->mScalingKeys[k].mValue.y,
+                                         ch->mScalingKeys[k].mValue.z)});
+        }
       }
-      for (unsigned int k = 0; k < ch->mNumRotationKeys; ++k) {
-        const aiQuaternion& q = ch->mRotationKeys[k].mValue;
-        out.rot.push_back({ch->mRotationKeys[k].mTime, QQuaternion(q.w, q.x, q.y, q.z)});
-      }
-      for (unsigned int k = 0; k < ch->mNumScalingKeys; ++k) {
-        out.scale.push_back({ch->mScalingKeys[k].mTime,
-                             QVector3D(ch->mScalingKeys[k].mValue.x, ch->mScalingKeys[k].mValue.y,
-                                       ch->mScalingKeys[k].mValue.z)});
-      }
+      m_clips.push_back(std::move(clip));
     }
-    m_hasAnim = !m_boneOffset.empty() && m_animDurationTicks > 0.0;
   }
+  selectClip(0);
 
   // スケルトン描画用の事前計算。ボーンに対応するノードに印を付け、各ノードから
   // 見た「最も近い祖先ボーンノード」を求めておく。これにより、間に挟まる非ボーンの
@@ -830,15 +839,13 @@ bool ModelView::loadModel(const QString& path, QString* error) {
   m_lastMs      = 0;
   buildGrid();
 
-  m_summary = QStringLiteral("%1 メッシュ · %2 マテリアル · %3 頂点 · %4 三角形")
-                  .arg(m_submeshes.size())
-                  .arg(m_materials.size())
-                  .arg(m_vertices.size() / ModelView::kFloatsPerVertex)
-                  .arg(triCount);
-  if (m_hasAnim)
-    m_summary += QStringLiteral(" · アニメ %1s / ボーン %2")
-                     .arg(animationDuration(), 0, 'f', 1)
-                     .arg(boneId.size());
+  m_summaryBase = QStringLiteral("%1 メッシュ · %2 マテリアル · %3 頂点 · %4 三角形")
+                      .arg(m_submeshes.size())
+                      .arg(m_materials.size())
+                      .arg(m_vertices.size() / ModelView::kFloatsPerVertex)
+                      .arg(triCount);
+  m_boneCount = int(boneId.size());
+  updateSummary();
 
   m_filePath = path;
   buildInfoText();
@@ -1205,6 +1212,47 @@ void ModelView::setAnimationPlaying(bool on) {
   } else {
     m_animTimer->stop();
   }
+  renderFrame();
+}
+// クリップ idx を現在のアニメとして設定する (内部用。再描画はしない)。
+void ModelView::selectClip(int idx) {
+  m_channels.assign(m_nodes.size(), Channel{});
+  m_hasAnim           = false;
+  m_animDurationTicks = 0.0;
+  m_ticksPerSec       = 25.0;
+  if (idx < 0 || idx >= int(m_clips.size())) return;
+  m_clip              = idx;
+  m_channels          = m_clips[idx].channels;
+  m_animDurationTicks = m_clips[idx].durationTicks;
+  m_ticksPerSec       = m_clips[idx].ticksPerSec;
+  m_hasAnim           = !m_boneOffset.empty() && m_animDurationTicks > 0.0;
+}
+QStringList ModelView::animationClipNames() const {
+  QStringList out;
+  for (size_t i = 0; i < m_clips.size(); ++i) {
+    out << (m_clips[i].name.isEmpty() ? QStringLiteral("clip %1").arg(i + 1) : m_clips[i].name);
+  }
+  return out;
+}
+void ModelView::updateSummary() {
+  m_summary = m_summaryBase;
+  if (m_hasAnim)
+    m_summary += QStringLiteral(" · アニメ %1s / ボーン %2").arg(animationDuration(), 0, 'f', 1).arg(m_boneCount);
+}
+void ModelView::setViewAngles(float yaw, float pitch, float dist) {
+  m_yaw   = yaw;
+  m_pitch = std::clamp(pitch, -1.53f, 1.53f);
+  m_dist  = std::clamp(dist, 0.2f, 40.0f);
+  renderFrame();
+}
+void ModelView::setAnimationClip(int idx) {
+  if (idx < 0 || idx >= int(m_clips.size()) || idx == m_clip) return;
+  selectClip(idx);
+  updateSummary();
+  buildInfoText();
+  emit animationClipChanged(idx);
+  m_animTimeSec = 0.0;
+  m_lastMs      = m_clock.isValid() ? m_clock.elapsed() : 0;
   renderFrame();
 }
 void ModelView::setAnimationTime(double sec) {
@@ -1578,6 +1626,7 @@ void ModelView::paintEvent(QPaintEvent*) {
          << QStringLiteral("C : 裏面カリング");
     if (!m_boneOffset.empty()) rows << QStringLiteral("B : ボーン");
     if (m_hasAnim) rows << QStringLiteral("Space : 再生 / 停止");
+    if (m_clips.size() > 1) rows << QStringLiteral("[ / ] : クリップ切替");
     rows << QStringLiteral("H : 操作の表示")
          << QStringLiteral("i : モデル情報");
     drawPanel(rows, nextTop, /*elide=*/false);
@@ -1677,6 +1726,14 @@ void ModelView::keyPressEvent(QKeyEvent* e) {
   // 引く。未割り当て / 未対応なら基底へ委譲する。
   const QString cmd = m_shortcuts.commandForSeq(ViewerShortcutMap::sequenceForEvent(e));
   if (!cmd.isEmpty() && dispatchShortcut(cmd)) {
+    return;
+  }
+  // アニメのクリップ切替は本体のキーバインドに無いので、プラグイン固定のキー ([ / ]) で受ける。
+  if (m_clips.size() > 1 && e->modifiers() == Qt::NoModifier &&
+      (e->key() == Qt::Key_BracketLeft || e->key() == Qt::Key_BracketRight)) {
+    const int n    = int(m_clips.size());
+    const int next = (m_clip + (e->key() == Qt::Key_BracketRight ? 1 : n - 1)) % n;
+    setAnimationClip(next);
     return;
   }
   QWidget::keyPressEvent(e);

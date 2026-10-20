@@ -24,6 +24,7 @@
 #include <QSize>
 #include <QString>
 #include <QStringList>
+#include <QStringList>
 #include <QVariantMap>
 #include <QVector3D>
 #include <QWidget>
@@ -76,11 +77,16 @@ public:
   // ── アニメーション ──
   bool   hasAnimation() const { return m_hasAnim; }
   double animationDuration() const { return m_ticksPerSec > 0 ? m_animDurationTicks / m_ticksPerSec : 0; }
+  QStringList animationClipNames() const;
+  int         animationClip() const { return m_clip; }
 
 public slots:
   void setTextureEnabled(bool on);
   void setAnimationPlaying(bool on);
   void setAnimationTime(double sec);
+  void setAnimationClip(int idx);
+  // 視点 (ラジアン / 距離係数) を直接設定する。検証・デモ撮影用。
+  void setViewAngles(float yaw, float pitch, float dist);
   void setShowGrid(bool on);
   void setShowHelp(bool on);
   void setShowBones(bool on);
@@ -105,6 +111,7 @@ signals:
   void wireframeChanged(bool on);
   void cullBackfaceChanged(bool on);
   void animationPlayingChanged(bool on);
+  void animationClipChanged(int idx);
   void infoRequested();  // i キー / ツールバーの情報ボタン相当
 
 protected:
@@ -221,6 +228,18 @@ private:
     std::vector<QuatKey> rot;
     std::vector<Vec3Key> scale;
   };
+  struct Clip {
+    QString              name;
+    double               durationTicks = 0.0;
+    double               ticksPerSec   = 25.0;
+    std::vector<Channel> channels;
+  };
+  void                    selectClip(int idx);
+  void                    updateSummary();
+  QString                 m_summaryBase;
+  int                     m_boneCount = 0;
+  std::vector<Clip>       m_clips;
+  int                     m_clip = 0;
   std::vector<Node>       m_nodes;
   std::vector<Channel>    m_channels;
   std::vector<QMatrix4x4> m_boneOffset;

@@ -54,6 +54,11 @@ int main(int argc, char** argv) {
   QString infoshotPath, infoSelect;
   bool    verboseInfo = false;
   double  timeOpt   = -1.0;
+  int     clipOpt   = -1;
+  bool    listClips = false;
+  int     winW = 1100, winH = 640;
+  double  yawOpt = 0.7, pitchOpt = 0.35, distOpt = 2.6;
+  bool    camOpt = false;
   const QStringList args = app.arguments();
   for (int i = 1; i < args.size(); ++i) {
     if (args[i] == QLatin1String("--shot") && i + 1 < args.size())
@@ -62,6 +67,19 @@ int main(int argc, char** argv) {
       uishotPath = args[++i];
     else if (args[i] == QLatin1String("--time") && i + 1 < args.size())
       timeOpt = args[++i].toDouble();
+    else if (args[i] == QLatin1String("--clip") && i + 1 < args.size())
+      clipOpt = args[++i].toInt();
+    else if (args[i] == QLatin1String("--yaw") && i + 1 < args.size())
+      yawOpt = args[++i].toDouble(), camOpt = true;
+    else if (args[i] == QLatin1String("--pitch") && i + 1 < args.size())
+      pitchOpt = args[++i].toDouble(), camOpt = true;
+    else if (args[i] == QLatin1String("--dist") && i + 1 < args.size())
+      distOpt = args[++i].toDouble(), camOpt = true;
+    else if (args[i] == QLatin1String("--size") && i + 1 < args.size()) {
+      const QStringList wh = args[++i].split(QLatin1Char('x'));
+      if (wh.size() == 2) winW = wh[0].toInt(), winH = wh[1].toInt();
+    } else if (args[i] == QLatin1String("--list-clips"))
+      listClips = true;
     else if (args[i] == QLatin1String("--no-texture"))
       noTexture = true;
     else if (args[i] == QLatin1String("--wire"))
@@ -93,6 +111,15 @@ int main(int argc, char** argv) {
     qWarning("load failed: %s", qPrintable(err));
     return 1;
   }
+  if (listClips) {
+    const QStringList names = view->animationClipNames();
+    for (int i = 0; i < names.size(); ++i) {
+      qInfo("clip %d: %s", i, qPrintable(names[i]));
+    }
+    return 0;
+  }
+  if (clipOpt >= 0) view->setAnimationClip(clipOpt);
+  if (camOpt) view->view()->setViewAngles(float(yawOpt), float(pitchOpt), float(distOpt));
   if (noTexture) view->setTextureEnabled(false);
   if (wire) view->view()->setWireframe(true);
   if (bones) view->view()->setShowBones(true);
@@ -121,7 +148,7 @@ int main(int argc, char** argv) {
 
   if (!infoshotPath.isEmpty()) {
     // 情報パネルを開いて (i キー相当)、ウィジェット全体を PNG に保存する。
-    view->resize(1100, 640);
+    view->resize(winW, winH);
     view->show();
     QMetaObject::invokeMethod(view->view(), "infoRequested");
     QApplication::processEvents();
@@ -139,6 +166,7 @@ int main(int argc, char** argv) {
     return ok ? 0 : 1;
   }
   if (!uishotPath.isEmpty()) {
+    view->resize(winW, winH);
     view->renderToImage();  // 3D フレームを用意
     const QPixmap pm = view->grab();
     const bool    ok = pm.save(uishotPath);

@@ -4,6 +4,8 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
+#include <QSignalBlocker>
 #include <QDialog>
 #include <QFontDatabase>
 #include <QDialogButtonBox>
@@ -327,6 +329,19 @@ ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
     m_actPlay->setIcon(makeIcon(on ? Glyph::Pause : Glyph::Play, ic));
   });
 
+  // アニメのクリップが複数あるファイル (glTF / FBX) 用の選択。クリップが 1 つ以下なら隠す。
+  m_clipBox = new QComboBox(m_toolbar);
+  m_clipBox->setToolTip(QStringLiteral("再生するアニメのクリップ"));
+  m_clipBox->setFocusPolicy(Qt::TabFocus);
+  m_clipBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  connect(m_clipBox, &QComboBox::currentIndexChanged, this, [this](int i) {
+    m_view->setAnimationClip(i);
+    refreshToolbar();
+    setFocus();
+  });
+  m_actClip = m_toolbar->addWidget(m_clipBox);
+  m_actClip->setVisible(false);
+
   QAction* actReset = m_toolbar->addAction(makeIcon(Glyph::Reset, ic), QString());
   actReset->setToolTip(QStringLiteral("視点をリセット (R)"));
   connect(actReset, &QAction::triggered, m_view, &ModelView::resetView);
@@ -355,6 +370,7 @@ ModelViewerWidget::ModelViewerWidget(QWidget* parent) : QWidget(parent) {
   connect(m_infoButton, &QToolButton::clicked, this, &ModelViewerWidget::toggleInfoPanel);
   m_toolbar->addWidget(m_infoButton);
   connect(m_view, &ModelView::infoRequested, this, &ModelViewerWidget::toggleInfoPanel);
+  connect(m_view, &ModelView::animationClipChanged, this, [this] { refreshToolbar(); });
 }
 
 // 右側の情報パネル (ノード階層 + 選択ノードの詳細) を作る。
@@ -496,6 +512,16 @@ void ModelViewerWidget::refreshToolbar() {
     m_actTexture->setChecked(hasTex);
   }
   m_actPlay->setVisible(m_view->hasAnimation());
+  {
+    const QStringList clips = m_view->animationClipNames();
+    QSignalBlocker    b(m_clipBox);
+    if (m_clipBox->count() != clips.size() || (clips.size() > 0 && m_clipBox->itemText(0) != clips[0])) {
+      m_clipBox->clear();
+      m_clipBox->addItems(clips);
+    }
+    m_clipBox->setCurrentIndex(m_view->animationClip());
+    m_actClip->setVisible(clips.size() > 1);
+  }
   m_actBones->setVisible(m_view->hasSkeleton());
 
   const QStringList ext = m_view->resolvedTexturePaths() + m_view->unresolvedTexturePaths();
@@ -539,5 +565,10 @@ QStringList ModelViewerWidget::unresolvedTexturePaths() const {
 }
 void ModelViewerWidget::setTextureEnabled(bool on) { m_view->setTextureEnabled(on); }
 void ModelViewerWidget::setAnimationTime(double sec) { m_view->setAnimationTime(sec); }
+QStringList ModelViewerWidget::animationClipNames() const { return m_view->animationClipNames(); }
+void        ModelViewerWidget::setAnimationClip(int idx) {
+  m_view->setAnimationClip(idx);
+  refreshToolbar();
+}
 
 } // namespace Farman

@@ -13,7 +13,8 @@ farman 内で表示**します。
 | Blender | `.blend` | メッシュ・マテリアルのみ。骨格・アニメは読み込めない (assimp の制約)。新しい Blender で保存した `.blend` (圧縮形式など) は読めないことがある |
 
 Blender は Z が上の座標系なので、読み込み時に Y 上へ回して立たせます。アニメが複数ある
-ファイルは、先頭のクリップを再生します。
+ファイルは、先頭のクリップを再生します。ツールバーの選択ボックスか `[` / `]` キーで、
+別のクリップに切り替えられます。
 
 ## 機能
 
@@ -45,7 +46,8 @@ cmake --build build
 
 検証用に `build/model_poc` も作られる。`./build/model_poc <model> --uishot out.png` で画像を、
 `--info-nodes` でノード情報を出せる (`--time <秒>` でアニメ時刻、`--infoshot` で
-情報パネル付き)。
+情報パネル付き、`--list-clips` / `--clip <番号>` でクリップ、`--yaw` / `--pitch` / `--dist` で視点、
+`--size WxH` で画像サイズ)。
 
 依存: Qt6 (Core/Gui/Widgets/**OpenGL**) と Assimp。**farman 本体と同じ Qt
 バージョン**でビルドすること (ABI 一致が必要)。QOpenGLWidget は使わないため

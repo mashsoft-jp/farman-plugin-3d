@@ -20,6 +20,8 @@ class QPlainTextEdit;
 class QSplitter;
 class QTreeWidget;
 
+class QComboBox;
+
 namespace Farman {
 
 class ModelView;
@@ -49,6 +51,8 @@ public:
   QStringList unresolvedTexturePaths() const;
   void        setTextureEnabled(bool on);
   void        setAnimationTime(double sec);
+  QStringList animationClipNames() const;
+  void        setAnimationClip(int idx);
 
   ModelView* view() const { return m_view; }
 
@@ -68,6 +72,8 @@ private:
   QAction*        m_actBones   = nullptr;
   QAction*        m_actHelp    = nullptr;
   QAction*        m_actPlay    = nullptr;
+  QComboBox*      m_clipBox    = nullptr;
+  QAction*        m_actClip    = nullptr;
   QToolButton*    m_infoButton = nullptr;
   QLabel*         m_pathLabel  = nullptr;
   QSplitter*      m_split      = nullptr;  // 左: 3D ビュー / 右: 情報パネル
